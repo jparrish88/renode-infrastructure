@@ -14,15 +14,21 @@ namespace Antmicro.Renode.Peripherals.UART
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
     public class PL011 : UARTBase, IDoubleWordPeripheral, IKnownSize, IProvidesRegisterCollection<DoubleWordRegisterCollection>
     {
-        public PL011(IMachine machine, uint fifoSize = 1, uint frequency = 24000000, bool sbsa = false) : base(machine)
+        private readonly bool ambiqDmaMode;
+        private IBusController sysbusCtrl;
+
+        public PL011(IMachine machine, uint fifoSize = 1, uint frequency = 24000000, bool sbsa = false, bool ambiqDma = false) : base(machine)
         {
             hardwareFifoSize = fifoSize;
             uartClockFrequency = frequency;
             sbsaMode = sbsa;
+            ambiqDmaMode = ambiqDma;
 
             IRQ = new GPIO();
-            interruptRawStatuses = new bool[InterruptsCount];
-            interruptMasks = new bool[InterruptsCount];
+            var intCount = ambiqDma ? AmbiqInterruptsCount : BaseInterruptsCount;
+            interruptRawStatuses = new bool[intCount];
+            interruptMasks = new bool[intCount];
+            sysbusCtrl = machine.GetSystemBus(this);
 
             RegistersCollection = new DoubleWordRegisterCollection(this);
             DefineRegisters();
@@ -199,9 +205,10 @@ namespace Antmicro.Renode.Peripherals.UART
                 .WithReservedBits(9, 7)
                 ;
 
+            var risBitCount = ambiqDmaMode ? 13 : 11;
             Registers.RawInterruptStatus.Define(this)
-                .WithFlags(0, 11, FieldMode.Read, valueProviderCallback: (interrupt, _) => interruptRawStatuses[interrupt])
-                .WithReservedBits(11, 5)
+                .WithFlags(0, risBitCount, FieldMode.Read, valueProviderCallback: (interrupt, _) => interruptRawStatuses[interrupt])
+                .WithReservedBits(risBitCount, 32 - risBitCount)
                 ;
 
             // If SBSA, set 8-bit Word Length (WLEN=0x3) and FIFO Enabled (FEN=0x1).
@@ -221,52 +228,116 @@ namespace Antmicro.Renode.Peripherals.UART
                 .WithReservedBits(8, 24)
                 ;
 
-            Registers.InterruptMask.Define(this)
-                .WithFlags(0, 11, changeCallback: (interrupt, _, newValue) => { interruptMasks[interrupt] = newValue; UpdateInterrupts(); })
-                .WithReservedBits(11, 5)
-                ;
+            if (ambiqDmaMode)
+            {
+                Registers.InterruptMask.Define(this)
+                    .WithFlags(0, 13, changeCallback: (interrupt, _, newValue) => { interruptMasks[interrupt] = newValue; UpdateInterrupts(); })
+                    .WithReservedBits(13, 3)
+                    ;
 
-            Registers.IntegerBaudRate.Define(this)
-                .WithValueField(0, 16, out integerBaudRate, name: "BAUD DIVINT - The integer baud rate divisor.")
-                ;
+                Registers.IntegerBaudRate.Define(this)
+                    .WithValueField(0, 16, out integerBaudRate, name: "BAUD DIVINT - The integer baud rate divisor.")
+                    ;
 
-            Registers.FractionalBaudRate.Define(this)
-                .WithValueField(0, 6, out fractionalBaudRate, name: "BAUD DIVFRAC - The fractional baud rate divisor")
-                .WithReservedBits(6, 10)
-                ;
+                Registers.FractionalBaudRate.Define(this)
+                    .WithValueField(0, 6, out fractionalBaudRate, name: "BAUD DIVFRAC - The fractional baud rate divisor")
+                    .WithReservedBits(6, 10)
+                    ;
 
-            Registers.DMAControl.Define(this)
-                .WithTaggedFlag("RXDMAE - Receive DMA enable", 0)
-                .WithTaggedFlag("TXDMAE - Transmit DMA enable", 1)
-                .WithTaggedFlag("DMAONERR - DMA on error", 2)
-                .WithReservedBits(3, 13)
-                ;
+                Registers.DMAControl.Define(this)
+                    .WithTaggedFlag("RXDMAE - Receive DMA enable", 0)
+                    .WithFlag(1, name: "TXDMAE - Transmit DMA enable (write 1 to start TX DMA)",
+                        writeCallback: (_, value) => { if (value) PerformTxDma(); })
+                    .WithTaggedFlag("DMAONERR - DMA on error", 2)
+                    .WithReservedBits(3, 13)
+                    ;
 
-            Registers.InterruptFIFOLevel.Define(this, 0b010010)  // The reset value is 2 for both fields.
-                .WithValueField(0, 3, name: "TXIFLSEL - Transmit interrupt FIFO level select")  // Hush write warnings. Transmit interrupts are never triggered.
-                .WithValueField(3, 3, out receiveInterruptFifoLevelSelect, name: "RXIFLSEL - Receive interrupt FIFO level select",
-                        changeCallback: (_, __) => UpdateReceiveInterruptTriggerPoint())
-                .WithReservedBits(6, 10)
-                ;
+                Registers.DmaTargetAddress.Define(this)
+                    .WithValueField(0, 32, out dmaTargetAddress, name: "TARGADDR - DMA transfer target/source address")
+                    ;
 
-            Registers.InterruptClear.Define(this)
-                .WithFlags(0, 11, FieldMode.Write, writeCallback: (interrupt, _, newValue) => { if(newValue) ClearInterrupt(interrupt); })
-                .WithReservedBits(11, 5)
-                ;
+                Registers.DmaCount.Define(this)
+                    .WithValueField(0, 12, out dmaTransferCount, name: "COUNT - DMA transfer count (number of bytes)")
+                    .WithReservedBits(12, 20)
+                    ;
 
-            // Any write to this 8-bit register should clear all the errors if they're ever set.
-            Registers.ReceiveStatus.Define(this)
-                .WithFlag(0, name: "FE - Framing error", valueProviderCallback: _ => false)
-                .WithFlag(1, name: "PE - Parity error", valueProviderCallback: _ => false)
-                .WithFlag(2, name: "BE - Break error", valueProviderCallback: _ => false)
-                .WithFlag(3, name: "OE - Overrun error", valueProviderCallback: _ => false)
-                .WithFlags(4, 4, FieldMode.Write)
-                ;
+                Registers.InterruptFIFOLevel.Define(this, 0b010010)
+                    .WithValueField(0, 3, name: "TXIFLSEL - Transmit interrupt FIFO level select")
+                    .WithValueField(3, 3, out receiveInterruptFifoLevelSelect, name: "RXIFLSEL - Receive interrupt FIFO level select",
+                            changeCallback: (_, __) => UpdateReceiveInterruptTriggerPoint())
+                    .WithReservedBits(6, 10)
+                    ;
 
-            Registers.MaskedInterruptStatus.Define(this)
-                .WithValueField(0, 11, FieldMode.Read, name: "Masked interrupt status", valueProviderCallback: _ => MaskedInterruptStatus)
-                .WithReservedBits(11, 5)
-                ;
+                Registers.InterruptClear.Define(this)
+                    .WithFlags(0, 13, FieldMode.Write, writeCallback: (interrupt, _, newValue) => { if(newValue) ClearInterrupt(interrupt); })
+                    .WithReservedBits(13, 3)
+                    ;
+
+                Registers.ReceiveStatus.Define(this)
+                    .WithFlag(0, name: "FE - Framing error", valueProviderCallback: _ => false)
+                    .WithFlag(1, name: "PE - Parity error", valueProviderCallback: _ => false)
+                    .WithFlag(2, name: "BE - Break error", valueProviderCallback: _ => false)
+                    .WithFlag(3, name: "OE - Overrun error", valueProviderCallback: _ => false)
+                    .WithFlag(4, FieldMode.Read, name: "DMACPL - DMA transfer complete",
+                        valueProviderCallback: _ => interruptRawStatuses[(int)Interrupts.DmaComplete])
+                    .WithFlag(5, FieldMode.Read, name: "DMAERR - DMA error",
+                        valueProviderCallback: _ => interruptRawStatuses[(int)Interrupts.DmaError])
+                    .WithReservedBits(6, 2)
+                    ;
+
+                Registers.MaskedInterruptStatus.Define(this)
+                    .WithValueField(0, 13, FieldMode.Read, name: "Masked interrupt status", valueProviderCallback: _ => MaskedInterruptStatus)
+                    .WithReservedBits(13, 3)
+                    ;
+            }
+            else
+            {
+                Registers.InterruptMask.Define(this)
+                    .WithFlags(0, 11, changeCallback: (interrupt, _, newValue) => { interruptMasks[interrupt] = newValue; UpdateInterrupts(); })
+                    .WithReservedBits(11, 5)
+                    ;
+
+                Registers.IntegerBaudRate.Define(this)
+                    .WithValueField(0, 16, out integerBaudRate, name: "BAUD DIVINT - The integer baud rate divisor.")
+                    ;
+
+                Registers.FractionalBaudRate.Define(this)
+                    .WithValueField(0, 6, out fractionalBaudRate, name: "BAUD DIVFRAC - The fractional baud rate divisor")
+                    .WithReservedBits(6, 10)
+                    ;
+
+                Registers.DMAControl.Define(this)
+                    .WithTaggedFlag("RXDMAE - Receive DMA enable", 0)
+                    .WithTaggedFlag("TXDMAE - Transmit DMA enable", 1)
+                    .WithTaggedFlag("DMAONERR - DMA on error", 2)
+                    .WithReservedBits(3, 13)
+                    ;
+
+                Registers.InterruptFIFOLevel.Define(this, 0b010010)
+                    .WithValueField(0, 3, name: "TXIFLSEL - Transmit interrupt FIFO level select")
+                    .WithValueField(3, 3, out receiveInterruptFifoLevelSelect, name: "RXIFLSEL - Receive interrupt FIFO level select",
+                            changeCallback: (_, __) => UpdateReceiveInterruptTriggerPoint())
+                    .WithReservedBits(6, 10)
+                    ;
+
+                Registers.InterruptClear.Define(this)
+                    .WithFlags(0, 11, FieldMode.Write, writeCallback: (interrupt, _, newValue) => { if(newValue) ClearInterrupt(interrupt); })
+                    .WithReservedBits(11, 5)
+                    ;
+
+                Registers.ReceiveStatus.Define(this)
+                    .WithFlag(0, name: "FE - Framing error", valueProviderCallback: _ => false)
+                    .WithFlag(1, name: "PE - Parity error", valueProviderCallback: _ => false)
+                    .WithFlag(2, name: "BE - Break error", valueProviderCallback: _ => false)
+                    .WithFlag(3, name: "OE - Overrun error", valueProviderCallback: _ => false)
+                    .WithFlags(4, 4, FieldMode.Write)
+                    ;
+
+                Registers.MaskedInterruptStatus.Define(this)
+                    .WithValueField(0, 11, FieldMode.Read, name: "Masked interrupt status", valueProviderCallback: _ => MaskedInterruptStatus)
+                    .WithReservedBits(11, 5)
+                    ;
+            }
 
             Registers.UARTPeriphID0.DefineMany(this, 4, (register, idx) =>
             {
@@ -361,6 +432,32 @@ namespace Antmicro.Renode.Peripherals.UART
             UpdateInterrupts();
         }
 
+        private void PerformTxDma()
+        {
+            var address = (ulong)dmaTargetAddress.Value;
+            var count = (int)(dmaTransferCount.Value & 0xFFF);
+            if(count == 0 || address == 0)
+            {
+                this.Log(LogLevel.Warning, "UART DMA: invalid TARGADDR=0x{0:X} or COUNT=0, ignoring.", address, count);
+                return;
+            }
+
+            this.Log(LogLevel.Noisy, "UART DMA TX starting: addr=0x{0:X}, count={1}", address, count);
+
+            for(var i = 0; i < count; i++)
+            {
+                var byteVal = sysbusCtrl.ReadByte(address + (ulong)i, context: this);
+                if(!loopbackEnable.Value)
+                {
+                    TransmitCharacter(byteVal);
+                }
+            }
+
+            interruptRawStatuses[(int)Interrupts.DmaComplete] = true;
+            UpdateInterrupts();
+            this.Log(LogLevel.Noisy, "UART DMA TX complete: {0} bytes transferred.", count);
+        }
+
         private uint InterruptMask => Renode.Utilities.BitHelper.GetValueFromBitsArray(interruptMasks);
 
         private uint MaskedInterruptStatus => RawInterruptStatus & InterruptMask;
@@ -383,6 +480,8 @@ namespace Antmicro.Renode.Peripherals.UART
         private IFlagRegisterField twoStopBitsSelect;
         private IFlagRegisterField uartEnable;
         private IEnumRegisterField<WordLength> wordLength;
+        private IValueRegisterField dmaTargetAddress;
+        private IValueRegisterField dmaTransferCount;
 
         private readonly bool sbsaMode;
         private readonly uint hardwareFifoSize;
@@ -392,7 +491,8 @@ namespace Antmicro.Renode.Peripherals.UART
         private readonly uint[] primeCellID = { 0x0D, 0xF0, 0x05, 0xB1 };
         private readonly uint uartClockFrequency;
 
-        private const uint InterruptsCount = 11;
+        private const uint BaseInterruptsCount = 11;
+        private const uint AmbiqInterruptsCount = 13;
         private const uint SBSADefaultBaudRate = 115200;
 
         private enum Interrupts
@@ -408,6 +508,8 @@ namespace Antmicro.Renode.Peripherals.UART
             ParityError,
             BreakError,
             OverrunError,
+            DmaComplete,
+            DmaError,
         }
 
         private enum Registers : long
@@ -426,6 +528,8 @@ namespace Antmicro.Renode.Peripherals.UART
             MaskedInterruptStatus           = 0x040,
             InterruptClear                  = 0x044,
             DMAControl                      = 0x048,
+            DmaTargetAddress                = 0x04C,
+            DmaCount                        = 0x050,
             UARTPeriphID0                   = 0xFE0,
             UARTPeriphID1                   = 0xFE4,
             UARTPeriphID2                   = 0xFE8,
