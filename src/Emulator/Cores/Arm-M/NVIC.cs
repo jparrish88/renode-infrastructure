@@ -993,7 +993,10 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
         {
             get
             {
-                return 0x1000;
+                // All real NVIC registers (ISER/ICER/IP...) live below offset ~0x800.
+                // Capping the mapped span at 0xC00 keeps 0xE000EDF0-0xE000EEFF free for
+                // the CoreSight DCS (DCB.DEMCR) so platforms can model DEMCR.TRCENA latch.
+                return 0xC00;
             }
         }
 

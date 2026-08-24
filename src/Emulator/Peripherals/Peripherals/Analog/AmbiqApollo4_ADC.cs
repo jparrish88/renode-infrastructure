@@ -296,7 +296,7 @@ namespace Antmicro.Renode.Peripherals.Analog
                 ;
 
             Registers.DMAConfiguration.Define(this)
-                .WithTaggedFlag("DMAEN", 0)
+                .WithValueField(0, 1, out dmaEn, name: "DMAEN")
                 .WithReservedBits(1, 1)
                 .WithTaggedFlag("DMADIR", 2)
                 .WithReservedBits(3, 5)
@@ -306,23 +306,24 @@ namespace Antmicro.Renode.Peripherals.Analog
                 .WithTaggedFlag("DMAMSK", 17)
                 .WithTaggedFlag("DPWROFF", 18)
                 .WithReservedBits(19, 13)
+                .WithChangeCallback((_, __) => { if (dmaEn.Value == 1) PerformDma(); })
                 ;
 
             Registers.DMATotalTransferCount.Define(this)
                 .WithReservedBits(0, 2)
-                .WithTag("TOTCOUNT", 2, 16)
+                .WithValueField(2, 16, out dmaTotCount, name: "TOTCOUNT")
                 .WithReservedBits(18, 14)
                 ;
 
             Registers.DMATargetAddress.Define(this, 0x10000000)
-                .WithTag("LTARGADDR", 0, 28)
-                .WithTag("UTARGADDR", 28, 4)
+                .WithValueField(0, 28, out dmaTargAddrLo, name: "LTARGADDR")
+                .WithValueField(28, 4, out dmaTargAddrHi, name: "UTARGADDR")
                 ;
 
             Registers.DMAStatus.Define(this)
-                .WithTaggedFlag("DMATIP", 0)
-                .WithTaggedFlag("DMACPL", 1)
-                .WithTaggedFlag("DMAERR", 2)
+                .WithValueField(0, 1, FieldMode.Read, name: "DMATIP", valueProviderCallback: _ => (uint)(dmaTip ? 1 : 0))
+                .WithValueField(1, 1, out dmaCplFlag, name: "DMACPL")
+                .WithValueField(2, 1, FieldMode.Read, name: "DMAERR", valueProviderCallback: _ => (uint)(dmaErr ? 1 : 0))
                 .WithReservedBits(3, 29)
                 ;
         }
@@ -377,9 +378,48 @@ namespace Antmicro.Renode.Peripherals.Analog
             }
         }
 
+        private void PerformDma()
+        {
+            var wordCount = (int)(dmaTotCount.Value & 0xFFFF);
+            if (wordCount == 0) return;
+
+            // Reconstruct full 32-bit target address from LTARGADDR[27:0] + UTARGADDR[31:28]
+            var addr = (dmaTargAddrLo.Value & 0x0FFFFFFF) | ((dmaTargAddrHi.Value & 0xF) << 28);
+
+            dmaErr = false;
+            for (int i = 0; i < wordCount; i++)
+            {
+                if (!fifo.TryDequeue(out var entry))
+                {
+                    // No more data in FIFO — fill remaining with zeros
+                    sysbus.WriteDoubleWord(addr + (uint)(i * 4), 0, context: this);
+                    dmaErr = true;
+                    continue;
+                }
+                sysbus.WriteDoubleWord(addr + (uint)(i * 4), entry.Data, context: this);
+            }
+
+            if (dmaErr)
+            {
+                SetInterruptStatus(Interrupts.DmaErrorCondition, true);
+            }
+            else
+            {
+                dmaCplFlag.Value = 1;
+                SetInterruptStatus(Interrupts.DmaTransferComplete, true);
+            }
+
+            // Auto-clear DMAEN after completion (one-shot transfer)
+            dmaEn.Value = 0;
+        }
+
         private IFlagRegisterField fifoPushEnabled;
         private IFlagRegisterField[] interruptEnableFlags;
         private IFlagRegisterField moduleEnabled;
+
+        // DMA state
+        private IValueRegisterField dmaEn, dmaTotCount, dmaTargAddrLo, dmaTargAddrHi, dmaCplFlag;
+        private volatile bool dmaTip = false, dmaErr = false;
 
         private readonly Queue<FifoEntry> fifo;
         private readonly bool[] interruptStatuses;

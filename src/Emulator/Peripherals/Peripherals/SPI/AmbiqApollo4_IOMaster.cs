@@ -24,8 +24,13 @@ namespace Antmicro.Renode.Peripherals.SPI
     public class AmbiqApollo4_IOMaster : IPeripheralContainer<ISPIPeripheral, TypedNumberRegistrationPoint<int>>, IPeripheralContainer<II2CPeripheral, TypedNumberRegistrationPoint<int>>,
         IDoubleWordPeripheral, IProvidesRegisterCollection<DoubleWordRegisterCollection>, IPeripheral, IKnownSize
     {
-        public AmbiqApollo4_IOMaster(IMachine machine)
+        // fullDuplex: when true, Write transactions also capture the slave's MISO output for each
+        // sent byte into the incoming FIFO (true full-duplex). Off by default so existing platforms
+        // and DMA tests keep the original half-duplex write behavior.
+        public AmbiqApollo4_IOMaster(IMachine machine, bool fullDuplex = false)
         {
+            this.fullDuplex = fullDuplex;
+
             RegistersCollection = new DoubleWordRegisterCollection(this);
 
             IRQ = new GPIO();
@@ -40,6 +45,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             i2cPeripherals = new Dictionary<int, II2CPeripheral>();
 
             this.machine = machine;
+            sysbusCtrl = machine.GetSystemBus(this);
 
             DefineRegisters();
             Reset();
@@ -315,7 +321,14 @@ namespace Antmicro.Renode.Peripherals.SPI
                                     activeTransactionSizeLeft.Value);
                                 break;
                             }
-                            SendData(value);
+                            if(fullDuplex)
+                            {
+                                SendDataFullDuplex(value);
+                            }
+                            else
+                            {
+                                SendData(value);
+                            }
                         }  // No else because only Read and Write commands are handled after 'IsTransactionValid'.
                     }
 
@@ -392,28 +405,29 @@ namespace Antmicro.Renode.Peripherals.SPI
                 ;
 
             Registers.DmaConfiguration.Define(this)
-                .WithTaggedFlag("DMAEN", 0)
-                .WithTaggedFlag("DMADIR", 1)
+                .WithValueField(0, 1, out dmaEn, name: "DMAEN")
+                .WithValueField(1, 1, out dmaDir, name: "DMADIR")
                 .WithReservedBits(2, 6)
                 .WithTaggedFlag("DMAPRI", 8)
                 .WithTaggedFlag("DPWROFF", 9)
                 .WithReservedBits(10, 22)
+                .WithChangeCallback((_, __) => { if (dmaEn.Value == 1) PerformDma(); })
                 ;
 
             Registers.DmaTotalTransferCount.Define(this)
-                .WithTag("TOTCOUNT", 0, 12)
+                .WithValueField(0, 12, out dmaTotCount, name: "TOTCOUNT")
                 .WithReservedBits(12, 20)
                 ;
 
             Registers.DmaTargetAddress.Define(this)
-                .WithTag("TARGADDR", 0, 29)
+                .WithValueField(0, 29, out dmaTargAddr, name: "TARGADDR")
                 .WithReservedBits(29, 3)
                 ;
 
             Registers.DmaStatus.Define(this)
-                .WithTaggedFlag("DMATIP", 0)
-                .WithTaggedFlag("DMACPL", 1)
-                .WithTaggedFlag("DMAERR", 2)
+                .WithValueField(0, 1, FieldMode.Read, name: "DMATIP", valueProviderCallback: _ => (uint)(dmaTip ? 1 : 0))
+                .WithValueField(1, 1, FieldMode.Read, name: "DMACPL", valueProviderCallback: _ => (uint)(dmaCpl ? 1 : 0), writeCallback: (_, __) => dmaCpl = false)
+                .WithValueField(2, 1, FieldMode.Read, name: "DMAERR", valueProviderCallback: _ => (uint)(dmaErr ? 1 : 0))
                 .WithReservedBits(3, 29)
                 ;
 
@@ -586,6 +600,55 @@ namespace Antmicro.Renode.Peripherals.SPI
             UpdateIRQ();
         }
 
+        private void PerformDma()
+        {
+            var count = (int)(dmaTotCount.Value & 0xFFF);
+            if (count == 0) return;
+
+            var addr = dmaTargAddr.Value; // ulong
+
+            // DMADIR: 0 = M2P (memory to peripheral), 1 = P2M (peripheral to memory)
+            if (dmaDir.Value == 0)
+            {
+                // Memory -> outgoing FIFO: read from system memory, push bytes into TX path
+                for (int i = 0; i < count; i++)
+                {
+                    var b = sysbusCtrl.ReadByte(addr + (uint)i, context: this);
+                    if (!outgoingFifo.TryPush(b))
+                    {
+                        dmaErr = true;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                // Incoming FIFO -> Memory: pop bytes from RX path, write to system memory
+                for (int i = 0; i < count; i++)
+                {
+                    if (!incomingFifo.TryPop(out var b))
+                    {
+                        dmaErr = true;
+                        break;
+                    }
+                    sysbusCtrl.WriteByte(addr + (uint)i, (byte)b, context: this);
+                }
+            }
+
+            if (dmaErr)
+            {
+                InterruptStatusSet(IoMasterInterrupts.DmaError);
+            }
+            else
+            {
+                dmaCpl = true;
+                InterruptStatusSet(IoMasterInterrupts.DmaComplete);
+            }
+
+            // Auto-clear DMAEN after completion (one-shot transfer)
+            dmaEn.Value = 0;
+        }
+
         private bool IsTransactionValid(Commands command, uint size, uint offsetCount, int spiSlaveSelect, out string errorMessage)
         {
             errorMessage = null;
@@ -597,10 +660,9 @@ namespace Antmicro.Renode.Peripherals.SPI
             {
                 errorMessage = "Read transaction with size 0 is illegal.";
             }
-            else if(command == Commands.Write && size != 0 && outgoingFifo.Empty)
-            {
-                errorMessage = $"{size}-byte write requested but the outgoing FIFO is empty.";
-            }
+            // NOTE: a Write with an empty outgoing FIFO is NOT rejected here. The full-duplex
+            // firmware path writes CMD (transaction start) before pushing TX data via FIFOPUSH;
+            // the deferred OutgoingFifoCountChangeAction sends each word as it lands in the FIFO.
             else if(offsetCount > 5)
             {
                 errorMessage = $"Invalid transaction offset count: {offsetCount}";
@@ -630,7 +692,14 @@ namespace Antmicro.Renode.Peripherals.SPI
                 if(fifo.TryPop(out var value))
                 {
                     this.Log(LogLevel.Noisy, "Unfinished write command found and outgoing FIFO contains data; sending 0x{0:X}...", value);
-                    SendData(value);
+                    if(fullDuplex)
+                    {
+                        SendDataFullDuplex(value);
+                    }
+                    else
+                    {
+                        SendData(value);
+                    }
                 }
             }
             UpdateFifoThresholdInterruptStatus();
@@ -702,6 +771,40 @@ namespace Antmicro.Renode.Peripherals.SPI
             {
                 var bytesToSend = Math.Min(4, (uint)activeTransactionSizeLeft.Value);
                 Send(value, bytesToSend);
+                activeTransactionSizeLeft.Value -= bytesToSend;
+                TryFinishTransaction();
+            }
+            else
+            {
+                throw new ArgumentException("Data shouldn't be sent if activeTransactionSizeLeft equals 0!");
+            }
+        }
+
+        // Full-duplex variant of SendData: for each byte sent to the slave, also capture the
+        // slave's MISO output and pack it (little-endian, like ReceiveData) into a double word
+        // that is pushed into the incoming FIFO so firmware can read the response back.
+        private void SendDataFullDuplex(uint value)
+        {
+            if(activeTransactionSizeLeft.Value > 0)
+            {
+                var bytesToSend = Math.Min(4, (uint)activeTransactionSizeLeft.Value);
+                if(ActiveTransactionPeripheral is ISPIPeripheral spiPeripheral)
+                {
+                    var dataBytes = BitHelper.GetBytesFromValue(value, (int)bytesToSend, reverse: true);
+                    uint misoResult = 0;
+                    for(int i = 0; i < bytesToSend; i++)
+                    {
+                        var inByte = spiPeripheral.Transmit(dataBytes[i]);
+                        BitHelper.UpdateWithShifted(ref misoResult, (uint)inByte, (int)(i * 8), 8);
+                        this.Log(LogLevel.Noisy, "Full-duplex: sent 0x{0:X2}, received MISO 0x{1:X2}", dataBytes[i], inByte);
+                    }
+
+                    if(!incomingFifo.TryPush(misoResult))
+                    {
+                        this.Log(LogLevel.Warning, "Cannot push full-duplex MISO data to the incoming FIFO; dropping 0x{0:X8}", misoResult);
+                    }
+                }
+
                 activeTransactionSizeLeft.Value -= bytesToSend;
                 TryFinishTransaction();
             }
@@ -890,6 +993,8 @@ namespace Antmicro.Renode.Peripherals.SPI
         private uint i2cSlaveAddress;
         private Status status;
 
+        private readonly bool fullDuplex;
+
         /*
             Both FIFOs occupy a single 64-byte memory:
             * 0x00 -- 0x1F outgoingFifo: "FIFO 0 (written by MCU, read by interface)",
@@ -901,6 +1006,12 @@ namespace Antmicro.Renode.Peripherals.SPI
         private readonly Dictionary<int, ISPIPeripheral> spiPeripherals;
         private readonly Dictionary<int, II2CPeripheral> i2cPeripherals;
         private readonly IMachine machine;
+        private readonly IBusController sysbusCtrl;
+
+        // DMA state
+        private IValueRegisterField dmaEn, dmaDir;
+        private IValueRegisterField dmaTotCount, dmaTargAddr;
+        private volatile bool dmaTip = false, dmaCpl = false, dmaErr = false;
 
         private const int IoMasterInterruptsCount = 15;
         private const int MaxSpiPeripheralsConnected = 4;
