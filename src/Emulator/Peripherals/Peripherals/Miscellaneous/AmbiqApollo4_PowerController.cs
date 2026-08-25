@@ -31,7 +31,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithReservedBits(5, 27)
                 ;
 
-            Registers.DevicePowerEnable.Define(this, 0x00100000)
+            Registers.DevicePowerEnable.Define(this, 0x00200000)
                 .WithTaggedFlag("PWRENIOS", 0)
                 .WithFlags(1, 4, out powerEnableFlagsIOM0_3, name: "PWRENIOMx")
                 .WithFlags(5, 4, out powerEnableFlagsIOM4_7, name: "PWRENIOMx")
@@ -40,15 +40,20 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithTaggedFlag("PWRENMSPI0", 14)
                 .WithTaggedFlag("PWRENMSPI1", 15)
                 .WithTaggedFlag("PWRENMSPI2", 16)
-                .WithTaggedFlag("PWRENGFX", 17)
-                .WithTaggedFlag("PWRENDISP", 18)
-                .WithTaggedFlag("PWRENDISPPHY", 19)
-                .WithFlag(20, out powerEnableFlagCrypto, name: "PWRENCRYPTO")
-                .WithTaggedFlag("PWRENSDIO", 21)
-                .WithTaggedFlag("PWRENUSB", 22)
-                .WithTaggedFlag("PWRENUSBPHY", 23)
-                .WithTaggedFlag("PWRENDBG", 24)
-                .WithReservedBits(25, 7)
+                .WithTaggedFlag("PWRENMSPI3", 17)
+                .WithTaggedFlag("PWRENGFX", 18)
+                .WithTaggedFlag("PWRENDISP", 19)
+                .WithTaggedFlag("PWRENDISPPHY", 20)
+                .WithFlag(21, out powerEnableFlagCrypto, name: "PWRENCRYPTO")
+                .WithTaggedFlag("PWRENSDIO0", 22)
+                .WithTaggedFlag("PWRENSDIO1", 23)
+                .WithTaggedFlag("PWRENUSB", 24)
+                .WithTaggedFlag("PWRENUSBPHY", 25)
+                .WithTaggedFlag("PWRENDBG", 26)
+                .WithFlag(27, out powerEnableFlagOtp, name: "PWRENOTP")
+                .WithTaggedFlag("PWRENIOSFD0", 28)
+                .WithTaggedFlag("PWRENIOSFD1", 29)
+                .WithReservedBits(30, 2)
                 ;
 
             Registers.DevicePowerStatus.Define(this)
@@ -60,15 +65,20 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithTaggedFlag("PWRSTMSPI0", 14)
                 .WithTaggedFlag("PWRSTMSPI1", 15)
                 .WithTaggedFlag("PWRSTMSPI2", 16)
-                .WithTaggedFlag("PWRSTGFX", 17)
-                .WithTaggedFlag("PWRSTDISP", 18)
-                .WithTaggedFlag("PWRSTDISPPHY", 19)
-                .WithFlag(20, FieldMode.Read, name: "PWRSTCRYPTO", valueProviderCallback: _ => powerEnableFlagCrypto.Value)
-                .WithTaggedFlag("PWRSTSDIO", 21)
-                .WithTaggedFlag("PWRSTUSB", 22)
-                .WithTaggedFlag("PWRSTUSBPHY", 23)
-                .WithTaggedFlag("PWRSTDBG", 24)
-                .WithReservedBits(25, 7)
+                .WithTaggedFlag("PWRSTMSPI3", 17)
+                .WithTaggedFlag("PWRSTGFX", 18)
+                .WithTaggedFlag("PWRSTDISP", 19)
+                .WithTaggedFlag("PWRSTDISPPHY", 20)
+                .WithFlag(21, FieldMode.Read, name: "PWRSTCRYPTO", valueProviderCallback: _ => powerEnableFlagCrypto.Value)
+                .WithTaggedFlag("PWRSTSDIO0", 22)
+                .WithTaggedFlag("PWRSTSDIO1", 23)
+                .WithTaggedFlag("PWRSTUSB", 24)
+                .WithTaggedFlag("PWRSTUSBPHY", 25)
+                .WithTaggedFlag("PWRSTDBG", 26)
+                .WithFlag(27, FieldMode.Read, name: "PWRSTOTP", valueProviderCallback: _ => powerEnableFlagOtp.Value)
+                .WithTaggedFlag("PWRSTIOSFD0", 28)
+                .WithTaggedFlag("PWRSTIOSFD1", 29)
+                .WithReservedBits(30, 2)
                 ;
 
             Registers.AudioSubsystemPowerEnable.Define(this)
@@ -604,6 +614,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         private IFlagRegisterField powerEnableFlagADC;
         private IFlagRegisterField powerEnableFlagCrypto;
+        private IFlagRegisterField powerEnableFlagOtp;
         private IFlagRegisterField[] powerEnableFlagsIOM0_3;
         private IFlagRegisterField[] powerEnableFlagsIOM4_7;
         private IFlagRegisterField[] powerEnableFlagsUart0_3;

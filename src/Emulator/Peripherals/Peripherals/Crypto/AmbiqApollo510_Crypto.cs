@@ -119,7 +119,12 @@ namespace Antmicro.Renode.Peripherals.Crypto
                 // --- HOSTCCISIDLE @ 0xA7C: CC idle status. Bit0 (HOSTCCISIDLE) must read 1 so that
                 //     am_bsp_itm_printf_enable()/am_hal_dcu_swo_enable() pass their access gate and the
                 //     CRYPTO_CC_IS_IDLE() busy-wait exits, which is what attaches ITM to stdio for SWO.
-                case 0xA7C: return 0x3B9;   // all sub-units idle (HOSTCCISIDLE|AHBISIDLE|NVMARB|NVM|RNG|PKA|CRYPTO)
+                 case 0xA7C: return 0x3B9;   // all sub-units idle (HOSTCCISIDLE|AHBISIDLE|NVMARB|NVM|RNG|PKA|CRYPTO)
+
+                 // --- NVMISIDLE @ 0x1F10: am_hal_pwrctrl_periph_enable(CRYPTO) waits for
+                 //     NVMISIDLEREG (bit0)==1 after the PWRSTCRYPTO bit sets, else it returns FAIL.
+                 case 0x1F10: return 0x1;
+
 
                 // --- DIN DMA status (1 = idle/ready) ---
                 case 0xC20: return (uint)(dinMemReady ? 1 : 0);   // DINMEMDMABUSY
