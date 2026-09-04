@@ -74,7 +74,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         private void DiagWrite(long offset, uint value)
         {
-            if (diagCount < 40)
+            if (diagCount < 400)
             {
                 this.Log(LogLevel.Info, "[ITM-DBG] write off=0x{0:X} val=0x{1:X}", offset, value);
             }

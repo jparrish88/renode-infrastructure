@@ -270,7 +270,6 @@ namespace Antmicro.Renode.Peripherals.UART
 
                 Registers.InterruptClear.Define(this)
                     .WithFlags(0, 13, FieldMode.Write, writeCallback: (interrupt, _, newValue) => { if(newValue) ClearInterrupt(interrupt); })
-                    .WithReservedBits(13, 3)
                     ;
 
                 Registers.ReceiveStatus.Define(this)
