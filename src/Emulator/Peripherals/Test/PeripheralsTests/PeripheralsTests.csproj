@@ -13,6 +13,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\..\Infrastructure.csproj"/>
+    <ProjectReference Include="..\..\..\..\..\..\Plugins\WiresharkPlugin\WiresharkPlugin.csproj"/>
     <ProjectReference Include="..\..\..\..\..\..\..\lib\Migrant\Migrant\Migrant.csproj"/>
   </ItemGroup>
 </Project>
