@@ -26,10 +26,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         private void DefineRegisters()
         {
+            // FIX for HP mode: FREQ write updates STATUS and ACK; VRSTATUS SIMOBUCK ACT below
             Registers.MCUPerformanceControl.Define(this, 0x00000009)
-                .WithTag("MCUPERFREQ", 0, 2)
-                .WithTaggedFlag("MCUPERFACK", 2)
-                .WithTag("MCUPERFSTATUS", 3, 2)
+                .WithValueField(0, 2, out mcuPerfFreq, name: "MCUPERFREQ", writeCallback: (_, v) => { if(mcuPerfStatus != null) mcuPerfStatus.Value = v; if(mcuPerfAck != null) mcuPerfAck.Value = true; })
+                .WithFlag(2, out mcuPerfAck, name: "MCUPERFACK", valueProviderCallback: _ => true)
+                .WithValueField(3, 2, out mcuPerfStatus, name: "MCUPERFSTATUS", valueProviderCallback: _ => mcuPerfFreq != null ? mcuPerfFreq.Value : 1)
                 .WithReservedBits(5, 27)
                 ;
 
@@ -39,13 +40,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithFlags(5, 4, out powerEnableFlagsIOM4_7, name: "PWRENIOMx")
                 .WithFlags(9, 4, out powerEnableFlagsUart0_3, name: "PWRENUARTx")
                 .WithFlag(13, out powerEnableFlagADC, name: "PWRENADC")
-                .WithTaggedFlag("PWRENMSPI0", 14)
+                .WithFlag(14, out powerEnableFlagMSPI0, name: "PWRENMSPI0")
                 .WithTaggedFlag("PWRENMSPI1", 15)
                 .WithTaggedFlag("PWRENMSPI2", 16)
                 .WithTaggedFlag("PWRENMSPI3", 17)
-                .WithTaggedFlag("PWRENGFX", 18)
-                .WithTaggedFlag("PWRENDISP", 19)
-                .WithTaggedFlag("PWRENDISPPHY", 20)
+                .WithFlag(18, out powerEnableFlagGfx, name: "PWRENGFX")
+                .WithFlag(19, out powerEnableFlagDisp, name: "PWRENDISP")
+                .WithFlag(20, out powerEnableFlagDispPhy, name: "PWRENDISPPHY")
                 .WithFlag(21, out powerEnableFlagCrypto, name: "PWRENCRYPTO")
                 .WithTaggedFlag("PWRENSDIO0", 22)
                 .WithTaggedFlag("PWRENSDIO1", 23)
@@ -64,13 +65,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithFlags(5, 4, FieldMode.Read, name: "PWRSTIOMx", valueProviderCallback: (_, __) => PowerStatusIOM4_7)
                 .WithFlags(9, 4, FieldMode.Read, name: "PWRSTUARTx", valueProviderCallback: (_, __) => PowerStatusUart0_3)
                 .WithFlag(13, FieldMode.Read, name: "PWRSTADC", valueProviderCallback: _ => powerEnableFlagADC.Value)
-                .WithTaggedFlag("PWRSTMSPI0", 14)
+                .WithFlag(14, FieldMode.Read, name: "PWRSTMSPI0", valueProviderCallback: _ => powerEnableFlagMSPI0.Value)
                 .WithTaggedFlag("PWRSTMSPI1", 15)
                 .WithTaggedFlag("PWRSTMSPI2", 16)
                 .WithTaggedFlag("PWRSTMSPI3", 17)
-                .WithTaggedFlag("PWRSTGFX", 18)
-                .WithTaggedFlag("PWRSTDISP", 19)
-                .WithTaggedFlag("PWRSTDISPPHY", 20)
+                .WithFlag(18, FieldMode.Read, name: "PWRSTGFX", valueProviderCallback: _ => powerEnableFlagGfx.Value)
+                .WithFlag(19, FieldMode.Read, name: "PWRSTDISP", valueProviderCallback: _ => powerEnableFlagDisp.Value)
+                .WithFlag(20, FieldMode.Read, name: "PWRSTDISPPHY", valueProviderCallback: _ => powerEnableFlagDispPhy.Value)
                 .WithFlag(21, FieldMode.Read, name: "PWRSTCRYPTO", valueProviderCallback: _ => powerEnableFlagCrypto.Value)
                 .WithTaggedFlag("PWRSTSDIO0", 22)
                 .WithTaggedFlag("PWRSTSDIO1", 23)
@@ -116,16 +117,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             Registers.MemoryPowerEnable.Define(this, 0x0000003F)
                 .WithTag("PWRENDTCM", 0, 3)
                 .WithTaggedFlag("PWRENNVM0", 3)
-                .WithTaggedFlag("PWRENCACHEB0", 4)
-                .WithTaggedFlag("PWRENCACHEB2", 5)
+                .WithFlag(4, out powerEnableFlagCacheB0, name: "PWRENCACHEB0")
+                .WithFlag(5, out powerEnableFlagCacheB2, name: "PWRENCACHEB2")
                 .WithReservedBits(6, 26)
                 ;
 
             Registers.MemoryPowerStatus.Define(this, 0x0000003F)
                 .WithTag("PWRSTDTCM", 0, 3)
                 .WithTaggedFlag("PWRSTNVM0", 3)
-                .WithTaggedFlag("PWRSTCACHEB0", 4)
-                .WithTaggedFlag("PWRSTCACHEB2", 5)
+                .WithFlag(4, FieldMode.Read, name: "PWRSTCACHEB0", valueProviderCallback: _ => powerEnableFlagCacheB0.Value)
+                .WithFlag(5, FieldMode.Read, name: "PWRSTCACHEB2", valueProviderCallback: _ => powerEnableFlagCacheB2.Value)
                 .WithReservedBits(6, 26)
                 ;
 
@@ -148,21 +149,17 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 ;
 
             Registers.SharedSRAMPowerEnable.Define(this)
-                .WithTag("PWRENSSRAM", 0, 2)
-                .WithReservedBits(2, 30)
+                .WithValueField(0, 3, out powerEnableFlagSSRAM, name: "PWRENSSRAM")
+                .WithReservedBits(3, 29)
                 ;
 
             Registers.SharedSRAMPowerStatus.Define(this, 0x00000003)
-                .WithTag("SSRAMPWRST", 0, 2)
-                .WithReservedBits(2, 30)
+                .WithValueField(0, 3, name: "SSRAMPWRST", valueProviderCallback: _ => powerEnableFlagSSRAM.Value)
+                .WithReservedBits(3, 29)
                 ;
 
             Registers.SharedSRAMRetConfiguration.Define(this, 0x000003FC)
-                .WithTag("SSRAMPWDSLP", 0, 2)
-                .WithTag("SSRAMACTMCU", 2, 2)
-                .WithTag("SSRAMACTDSP", 4, 2)
-                .WithTag("SSRAMACTGFX", 6, 2)
-                .WithTag("SSRAMACTDISP", 8, 2)
+                .WithValueField(0, 10, name: "SSRAMPWR")
                 .WithReservedBits(10, 22)
                 ;
 
@@ -187,14 +184,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 ;
 
             Registers.MultimediaSystemOverride.Define(this, 0x00000FFC)
-                .WithTaggedFlag("MMSOVRMCULDISP", 0)
-                .WithTaggedFlag("MMSOVRMCULGFX", 1)
-                .WithTaggedFlag("MMSOVRSSRAMDISP", 2)
-                .WithTaggedFlag("MMSOVRSSRAMGFX", 3)
-                .WithTag("MMSOVRDSPRAMRETDISP", 4, 2)
-                .WithTag("MMSOVRDSPRAMRETGFX", 6, 2)
-                .WithTag("MMSOVRSSRAMRETDISP", 8, 2)
-                .WithTag("MMSOVRSSRAMRETGFX", 10, 2)
+                .WithValueField(0, 12, name: "MMSOVR")
                 .WithReservedBits(12, 20)
                 ;
 
@@ -294,7 +284,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithReservedBits(19, 13)
                 ;
 
-            Registers.VoltageRegulatorsStatus.Define(this)
+            // FIX: SIMOBUCKST must be ACT=3 (0b11) at bits 4-5 => 0x30 for HP switch check am_hal_pwrctrl_mcu_mode_select: PWRCTRL_VRSTATUS_SIMOBUCKST_ACT=3 per apollo510.h:82157
+            Registers.VoltageRegulatorsStatus.Define(this, 0x00000030)
                 .WithTag("CORELDOST", 0, 2)
                 .WithTag("MEMLDOST", 2, 2)
                 .WithTag("SIMOBUCKST", 4, 2)
@@ -617,9 +608,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private IFlagRegisterField powerEnableFlagADC;
         private IFlagRegisterField powerEnableFlagCrypto;
         private IFlagRegisterField powerEnableFlagOtp;
+        private IFlagRegisterField powerEnableFlagMSPI0;
+        private IFlagRegisterField powerEnableFlagGfx;
+        private IFlagRegisterField powerEnableFlagDisp;
+        private IFlagRegisterField powerEnableFlagDispPhy;
+        private IFlagRegisterField powerEnableFlagCacheB0;
+        private IFlagRegisterField powerEnableFlagCacheB2;
+        private IValueRegisterField powerEnableFlagSSRAM;
         private IFlagRegisterField[] powerEnableFlagsIOM0_3;
         private IFlagRegisterField[] powerEnableFlagsIOM4_7;
         private IFlagRegisterField[] powerEnableFlagsUart0_3;
+        private IValueRegisterField mcuPerfFreq;
+        private IFlagRegisterField mcuPerfAck;
+        private IValueRegisterField mcuPerfStatus;
 
         private enum Registers : long
         {
