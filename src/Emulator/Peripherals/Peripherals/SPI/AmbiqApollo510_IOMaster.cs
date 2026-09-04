@@ -186,6 +186,9 @@ namespace Antmicro.Renode.Peripherals.SPI
             Registers.FifoPush.Define(this)
                 .WithValueField(0, 32, FieldMode.Write, name: "FIFODIN", writeCallback: (_, newValue) =>
                 {
+                    var n = (uint)newValue;
+                    this.Log(LogLevel.Info, "iom6 FIFODIN push w=0x{0:X8} bytes=[{1:X2} {2:X2} {3:X2} {4:X2}] outDepth={5}",
+                        n, n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF, outgoingFifo.BytesCount);
                     if(!outgoingFifo.TryPush((uint)newValue))
                     {
                         this.Log(LogLevel.Warning, "Failed to write to the outgoing FIFO (value: 0x{0})", newValue);
@@ -257,10 +260,10 @@ namespace Antmicro.Renode.Peripherals.SPI
                 .WithValueField(24, 8, out transactionOffsetLow, name: "OFFSETLO")
                 .WithWriteCallback((_, __) =>
                 {
-                    this.Log(LogLevel.Debug,
-                            "Transaction received for #{0}; command: {1}, size: {2}, offset: <count: {3}, low=0x{4:X2}, high=0x{5:X8}>, cont: {6}",
+                    this.Log(LogLevel.Info,
+                            "Transaction received for #{0}; command: {1}, size: {2}, offset: <count: {3}, low=0x{4:X2}, high=0x{5:X8}>, cont: {6}, fullDup={7}",
                             PrettyPendingPeripheral, transactionCommand.Value, transactionSize.Value, transactionOffsetCount.Value,
-                            transactionOffsetLow.Value, transactionOffsetHigh.Value, transactionContinue.Value);
+                            transactionOffsetLow.Value, transactionOffsetHigh.Value, transactionContinue.Value, IsFullDuplex());
 
                     if(!spiMasterEnabled.Value && !i2cMasterEnabled.Value)
                     {
@@ -323,7 +326,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                                     activeTransactionSizeLeft.Value);
                                 break;
                             }
-                            if(fullDuplex)
+                            if(IsFullDuplex())
                             {
                                 SendDataFullDuplex(value);
                             }
@@ -344,7 +347,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             Registers.DcxControlAndCeUsageSelection.Define(this)
                 .WithTag("DCXSEL", 0, 4)
                 .WithTaggedFlag("DCXEN", 4)
-                .WithReservedBits(5, 27)
+                .WithIgnoredBits(5, 27)
                 ;
 
             Registers.HighOrderBytesBfOffsetForIOTransaction.Define(this)
@@ -396,7 +399,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             Registers.DmaTriggerEnable.Define(this)
                 .WithTaggedFlag("DCMDCMPEN", 0)
                 .WithTaggedFlag("DTHREN", 1)
-                .WithReservedBits(2, 30)
+                .WithIgnoredBits(2, 30)
                 ;
 
             Registers.DmaTriggerStatus.Define(this)
@@ -434,50 +437,58 @@ namespace Antmicro.Renode.Peripherals.SPI
                 ;
 
             Registers.CommandQueueConfiguration.Define(this)
-                .WithTaggedFlag("CQEN", 0)
-                .WithTaggedFlag("CQPRI", 1)
-                .WithTag("MSPIFLGSEL", 2, 2)
-                .WithReservedBits(4, 28)
+                .WithFlag(0, out cqEnabled, name: "CQEN", writeCallback: (_, v) => { if(v) { ProcessCommandQueue(); } })
+                .WithFlag(1, name: "CQPRI")
+                .WithValueField(2, 2, name: "MSPIFLGSEL")
+                .WithIgnoredBits(4, 28)
                 ;
 
             Registers.CommandQueueTargetReadAddress.Define(this)
-                .WithReservedBits(0, 2)
-                .WithTag("CQADDR", 2, 27)
-                .WithReservedBits(29, 3)
+                .WithIgnoredBits(0, 2)
+                .WithValueField(2, 27, out cqAddressField, name: "CQADDR",
+                    writeCallback: (_, v) => { cqAddress = (uint)(v << 2); ProcessCommandQueue(); })
+                .WithIgnoredBits(29, 3)
                 ;
 
             Registers.CommandQueueStatus.Define(this)
-                .WithTaggedFlag("CQTIP", 0)
-                .WithTaggedFlag("CQPAUSED", 1)
-                .WithTaggedFlag("CQERR", 2)
-                .WithReservedBits(3, 29)
+                .WithFlag(0, FieldMode.Read, name: "CQTIP", valueProviderCallback: _ => cqTip)
+                .WithFlag(1, FieldMode.Read, name: "CQPAUSED", valueProviderCallback: _ => IsCqPaused())
+                .WithFlag(2, FieldMode.Read, name: "CQERR", valueProviderCallback: _ => cqErr)
+                .WithIgnoredBits(3, 29)
                 ;
 
             Registers.CommandQueueFlag.Define(this)
-                .WithTag("CQFLAGS", 0, 16)
-                .WithTag("CQIRQMASK", 16, 16)
+                .WithValueField(0, 16, out cqFlagsField, name: "CQFLAGS",
+                    writeCallback: (_, v) => { cqSwFlags = (uint)(v & 0xFF); CheckCqPauseAndProcess(); })
+                .WithValueField(16, 16, out cqIrqMaskField, name: "CQIRQMASK")
                 ;
 
             Registers.CommandQueueFlagSetClear.Define(this)
-                .WithTag("CQFSET", 0, 8)
-                .WithTag("CQFTGL", 8, 8)
-                .WithTag("CQFCLR", 16, 8)
-                .WithReservedBits(24, 8)
+                .WithValueField(0, 8, FieldMode.Write, name: "CQFSET",
+                    writeCallback: (_, v) => { cqSwFlags |= (uint)(v & 0xFF); CheckCqPauseAndProcess(); })
+                .WithValueField(8, 8, FieldMode.Write, name: "CQFTGL",
+                    writeCallback: (_, v) => { cqSwFlags ^= (uint)(v & 0xFF); CheckCqPauseAndProcess(); })
+                .WithValueField(16, 8, FieldMode.Write, name: "CQFCLR",
+                    writeCallback: (_, v) => { cqSwFlags &= ~(uint)(v & 0xFF); CheckCqPauseAndProcess(); })
+                .WithIgnoredBits(24, 8)
                 ;
 
             Registers.CommandQueuePauseEnable.Define(this)
-                .WithTag("CQPEN", 0, 16)
-                .WithReservedBits(16, 16)
+                .WithValueField(0, 16, out cqPauseEnField, name: "CQPEN",
+                    writeCallback: (_, v) => { CheckCqPauseAndProcess(); })
+                .WithIgnoredBits(16, 16)
                 ;
 
             Registers.CommandQueueCurrentIndexValue.Define(this)
-                .WithTag("CQCURIDX", 0, 8)
-                .WithReservedBits(8, 24)
+                .WithValueField(0, 8, out cqCurIdxField, name: "CQCURIDX",
+                    writeCallback: (_, v) => { CheckCqPauseAndProcess(); })
+                .WithIgnoredBits(8, 24)
                 ;
 
             Registers.CommandQueueEndIndexValue.Define(this)
-                .WithTag("CQENDIDX", 0, 8)
-                .WithReservedBits(8, 24)
+                .WithValueField(0, 8, out cqEndIdxField, name: "CQENDIDX",
+                    writeCallback: (_, v) => { CheckCqPauseAndProcess(); })
+                .WithIgnoredBits(8, 24)
                 ;
 
             Registers.IOModuleStatus.Define(this)
@@ -490,12 +501,12 @@ namespace Antmicro.Renode.Peripherals.SPI
             Registers.SpiModuleMasterConfiguration.Define(this, 0x00200000)
                 .WithTaggedFlag("SPOL", 0)
                 .WithTaggedFlag("SPHA", 1)
-                .WithTaggedFlag("FULLDUP", 2)
-                .WithReservedBits(3, 13)
+                .WithFlag(2, out fullDuplexReg, name: "FULLDUP")
+                .WithIgnoredBits(3, 13)
                 .WithTaggedFlag("WTFC", 16)
                 .WithTaggedFlag("RDFC", 17)
                 .WithTaggedFlag("MOSIINV", 18)
-                .WithReservedBits(19, 1)
+                .WithIgnoredBits(19, 1)
                 .WithTaggedFlag("WTFCIRQ", 20)
                 .WithTaggedFlag("WTFCPOL", 21)
                 .WithTaggedFlag("RDFCPOL", 22)
@@ -503,7 +514,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                 .WithTag("DINDLY", 24, 3)
                 .WithTag("DOUTDLY", 27, 3)
                 .WithTaggedFlag("MSPIRST", 30)
-                .WithReservedBits(31, 1)
+                .WithIgnoredBits(31, 1)
                 ;
 
             // Some software expects values written to
@@ -651,6 +662,140 @@ namespace Antmicro.Renode.Peripherals.SPI
             dmaEn.Value = 0;
         }
 
+        // True when the CQ is enabled but must be held: either at an index match
+        // (CQCURIDX == CQENDIDX, TRM 14.5.4) or with all of the pause-enable flags asserted.
+        private bool IsCqPaused()
+        {
+            if(!cqEnabled.Value)
+            {
+                return false;
+            }
+
+            var curIdx = (uint)cqCurIdxField.Value & 0xFFu;
+            var endIdx = (uint)cqEndIdxField.Value & 0xFFu;
+            if(curIdx == endIdx)
+            {
+                return true;
+            }
+
+            var pauseMask = (uint)(cqPauseEnField.Value & 0xFFFFu);
+            if(pauseMask != 0 && (cqSwFlags & pauseMask) == pauseMask)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        // Re-evaluate the CQ after a flag / pause-enable / index register write: resume
+        // processing when enabled and not paused, otherwise surface the paused condition.
+        private void CheckCqPauseAndProcess()
+        {
+            if(!cqEnabled.Value)
+            {
+                return;
+            }
+
+            if(IsCqPaused())
+            {
+                InterruptStatusSet(IoMasterInterrupts.CommandQueuePaused);
+                return;
+            }
+
+            ProcessCommandQueue();
+        }
+
+        // Walk the command queue in memory. Each entry is a pair of 32-bit words:
+        // (target register address, data). For every pair we execute an internal write to this
+        // peripheral -- which is how queued operations such as DMACFG/DMAEN kick off a transfer
+        // (TRM 14.5.1). CQCURIDX advances once per completed DMA operation and the queue pauses
+        // when it reaches CQENDIDX (TRM 14.5.4); an entry whose address has bit 0 set raises the
+        // CommandQueueUPD interrupt for that write (TRM 14.5.2).
+        private void ProcessCommandQueue()
+        {
+            if(!cqEnabled.Value || cqProcessing)
+            {
+                return;
+            }
+
+            cqProcessing = true;
+            cqTip = true;   // transfer in progress (remains active even while paused, TRM 14.5.2)
+            try
+            {
+                var entriesProcessed = 0;
+                while(cqEnabled.Value && !IsCqPaused() && !cqErr)
+                {
+                    if(++entriesProcessed > CqMaxEntriesPerRun)
+                    {
+                        this.Log(LogLevel.Warning, "Command queue hit the safety limit ({0} entries) without reaching its end index; stopping to avoid a runaway walk.", CqMaxEntriesPerRun);
+                        cqErr = true;
+                        InterruptStatusSet(IoMasterInterrupts.CommandQueueError);
+                        break;
+                    }
+
+                    uint regAddressWord, dataWord;
+                    try
+                    {
+                        regAddressWord = sysbusCtrl.ReadDoubleWord((ulong)cqAddress, context: this);
+                        dataWord = sysbusCtrl.ReadDoubleWord((ulong)(cqAddress + 4), context: this);
+                    }
+                    catch(Exception ex)
+                    {
+                        this.Log(LogLevel.Error, "Command queue fetch from 0x{0:X} failed ({1}); aborting.", cqAddress, ex.Message);
+                        cqErr = true;
+                        InterruptStatusSet(IoMasterInterrupts.CommandQueueError);
+                        break;
+                    }
+
+                    // Advance the live CQADDR pointer to the next pair before executing this one.
+                    cqAddress += 8;
+                    try
+                    {
+                        cqAddressField.Value = (uint)(cqAddress >> 2);   // field holds bits [28:2] of the byte address
+                    }
+                    catch(Exception)
+                    {
+                        // The live pointer is informational only; ignore if it cannot be updated.
+                    }
+
+                    var interruptOnThisEntry = (regAddressWord & 1u) != 0;   // TRM 14.5.2 bit-0 trick
+                    var regAddress = regAddressWord & ~1UL;                  // strip the flag bit -> real register address
+                    var isDmaOperation = ((regAddress & 0xFFuL) == (ulong)(Registers.DmaConfiguration)) && (dataWord & 1u) != 0;
+
+                    if(regAddress != 0)
+                    {
+                        sysbusCtrl.WriteDoubleWord(regAddress, dataWord, context: this);   // execute the queued register write
+                    }
+
+                    if(interruptOnThisEntry)
+                    {
+                        InterruptStatusSet(IoMasterInterrupts.CommandQueueUPD);
+                    }
+
+                    if(isDmaOperation)
+                    {
+                        cqCurIdxField.Value = (uint)((cqCurIdxField.Value + 1) & 0xFFu);   // one operation completed
+                        if(IsCqPaused())
+                        {
+                            InterruptStatusSet(IoMasterInterrupts.CommandQueuePaused);
+                            break;
+                        }
+                    }
+                }
+
+                // Clear the active indicator only when no longer enabled or on error -- per TRM 14.5.2
+                // CQTIP stays set while merely paused waiting for software to post more operations.
+                if(!cqEnabled.Value || cqErr)
+                {
+                    cqTip = false;
+                }
+            }
+            finally
+            {
+                cqProcessing = false;
+            }
+        }
+
         private bool IsTransactionValid(Commands command, uint size, uint offsetCount, int spiSlaveSelect, out string errorMessage)
         {
             errorMessage = null;
@@ -694,7 +839,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                 if(fifo.TryPop(out var value))
                 {
                     this.Log(LogLevel.Noisy, "Unfinished write command found and outgoing FIFO contains data; sending 0x{0:X}...", value);
-                    if(fullDuplex)
+                    if(IsFullDuplex())
                     {
                         SendDataFullDuplex(value);
                     }
@@ -997,6 +1142,11 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private readonly bool fullDuplex;
 
+        // FULLDUP bit (SpiModuleMasterConfiguration 0x280, bit 2): when set by firmware, Write
+        // transactions capture the slave's MISO output. Read from the register so it tracks config.
+        private IFlagRegisterField fullDuplexReg;
+        private bool IsFullDuplex() => fullDuplex || (fullDuplexReg != null && fullDuplexReg.Value);
+
         /*
             Both FIFOs occupy a single 64-byte memory:
             * 0x00 -- 0x1F outgoingFifo: "FIFO 0 (written by MCU, read by interface)",
@@ -1014,6 +1164,28 @@ namespace Antmicro.Renode.Peripherals.SPI
         private IValueRegisterField dmaEn, dmaDir;
         private IValueRegisterField dmaTotCount, dmaTargAddr;
         private volatile bool dmaTip = false, dmaCpl = false, dmaErr = false;
+
+        // Command Queue (MSPI/IOM CQ) state -- see TRM 14.5 "Command Queueing"
+        private IFlagRegisterField cqEnabled;
+        private IValueRegisterField cqAddressField;
+        private IValueRegisterField cqFlagsField;
+        private IValueRegisterField cqIrqMaskField;
+        private IValueRegisterField cqPauseEnField;
+        private IValueRegisterField cqCurIdxField;
+        private IValueRegisterField cqEndIdxField;
+
+        // Live byte address of the next (address, data) pair to fetch from memory.
+        private uint cqAddress;
+        // Software-writable flag bits [7:0] backing CQFLAGS / CQFSET / CQFTGL / CQFCLR.
+        private uint cqSwFlags;
+        // Read-only status flags surfaced via CommandQueueStatus (CQTIP / CQERR).
+        private volatile bool cqTip = false, cqErr = false;
+        // Re-entrancy guard so a queued write cannot re-enter the walker mid-run.
+        private bool cqProcessing;
+
+        // Upper bound on pairs processed in one synchronous run; guards against a runaway walk if
+        // firmware misconfigures the indices or points CQADDR at garbage (TRM 14.5.2 CQERR case).
+        private const int CqMaxEntriesPerRun = 1024;
 
         private const int IoMasterInterruptsCount = 15;
         private const int MaxSpiPeripheralsConnected = 4;
