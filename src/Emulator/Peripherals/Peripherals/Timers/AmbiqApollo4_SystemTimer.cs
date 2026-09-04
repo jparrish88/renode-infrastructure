@@ -123,18 +123,13 @@ namespace Antmicro.Renode.Peripherals.Timers
                 (register, registerIndex) =>
                 {
                     register.WithValueField(0, 32, name: $"SCMPR{registerIndex}",
-                        // SCMPR value written is relative to the current COUNTER (systemTimer's Value).
                         writeCallback: (_, newValue) =>
                         {
-                            // Ambiq HAL does a Compare delta adjustment:
-                            // on HW it takes 2 clock cycles for writes to this register to be effective
-                            // and the interrupt itself is delayed by 1.
-                            // Hence the timer incrementation.
-                            if((compareRegisters[registerIndex].CompareValue - (uint)newValue) > 3)
-                            {
-                                systemTimer.Increment(3);
-                            }
-                            compareRegisters[registerIndex].CompareValue = Value + (uint)newValue;
+                            if((compareRegisters[registerIndex].CompareValue - (uint)newValue) > 3) systemTimer.Increment(3);
+                            // Apollo510 HAL writes absolute COUNTER+delta, Apollo4 writes relative delta
+                            // If newValue already > current Value, it's absolute (Apollo510) - don't add Value again
+                            var v = (uint)newValue;
+                            compareRegisters[registerIndex].CompareValue = (v > Value) ? v : Value + v;
                         },
                         valueProviderCallback: _ => compareRegisters[registerIndex].CompareValue);
                 }, stepInBytes: 4);
@@ -372,7 +367,7 @@ namespace Antmicro.Renode.Peripherals.Timers
                         enabled: false, workMode: WorkMode.Periodic, eventEnabled: true, compare: 0, divider: 1);
                 innerTimer.CompareReached += () =>
                 {
-                    owner.Log(LogLevel.Debug, "{0}: Compare value (0x{1:X}) reached", name, innerTimer.Compare);
+                    owner.Log(LogLevel.Info, "{0}: Compare 0x{1:X} reached at STTMR 0x{2:X} -> IRQ", name, innerTimer.Compare, owner.Value);
                     InterruptStatus = true;
                 };
             }

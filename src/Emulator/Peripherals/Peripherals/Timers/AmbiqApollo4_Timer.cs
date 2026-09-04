@@ -34,6 +34,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             functionSelect = new IEnumRegisterField<FunctionSelect>[TimersCount];
             triggerMode = new IEnumRegisterField<TriggerMode>[TimersCount];
             triggerSource = new IEnumRegisterField<TriggerSource>[TimersCount];
+            lastFunctionSelect = new uint[TimersCount];
 
             Connections = new ReadOnlyDictionary<int, IGPIO>(innerConnections);
 
@@ -269,9 +270,15 @@ namespace Antmicro.Renode.Peripherals.Timers
                                 internalTimers[index].OneShot = true;
                                 break;
                             default:
-                                this.Log(LogLevel.Error, "Timer{0}: {1} function mode is not supported", index, value);
+                                // Edge / PWM / Downcount / Pattern / EventTimer are accepted and emulated as a
+                                // continuous free-running counter (trigger/PWM input edges are not wired in our
+                                // platform). Log once per mode change so normal runs stay clean.
+                                internalTimers[index].OneShot = false;
+                                if(lastFunctionSelect[index] != (uint)value)
+                                    this.NoisyLog("Timer{0}: {1} function mode emulated as continuous count", index, value);
                                 break;
                             }
+                            lastFunctionSelect[index] = (uint)value;
                         })
                     .WithEnumField<DoubleWordRegister, ClockSelect>(8, 8, name: $"TMR{index}CLK",
                         changeCallback: (_, newValue) =>
@@ -339,6 +346,8 @@ namespace Antmicro.Renode.Peripherals.Timers
         private readonly IEnumRegisterField<FunctionSelect>[] functionSelect;
         private readonly IEnumRegisterField<TriggerMode>[] triggerMode;
         private readonly IEnumRegisterField<TriggerSource>[] triggerSource;
+
+        private readonly uint[] lastFunctionSelect;
 
         private readonly InternalTimer[] internalTimers;
 
