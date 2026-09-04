@@ -165,6 +165,7 @@ namespace Antmicro.Renode.Peripherals.SPI
 
             int pos = txnLen++;
             txnBuf.Add(data);
+            this.Log(LogLevel.Info, "TX pos={0} mosi=0x{1:X2} cmdInProg={2} state={3}", pos, data, commandInProgress, state);
 
             // --- TX handshake MISO (first AND any continuation handshake) ----------
             // am_devices_em9305_tx_starts() requires byte[0]==0xC0 and byte[1]!=0 on every
@@ -182,32 +183,52 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
 
             // --- RX read path (only when not in the middle of assembling a command) -
+            this.Log(LogLevel.Noisy, "EM9305: RX path check commandInProgress={0} state={1} pos={2} data=0x{3:X2} txnLen={4}", commandInProgress, state, pos, data, txnLen);
             if (!commandInProgress)
             {
                 switch (state)
                 {
                     case State.Idle:
+                        this.Log(LogLevel.Noisy, "EM9305: Idle check pos={0} data=0x{1:X2} txnLen={2} txnBuf=[{3}]", pos, data, txnLen, string.Join(",", txnBuf));
                         if (pos == 0 && data == HeaderRx)
                         {
                             state = State.RxCountReq;
-                            this.Log(LogLevel.Noisy, "EM9305: RX header 0x{0:X2} seen", data);
+                            this.Log(LogLevel.Noisy, "EM9305: RX header 0x{0:X2} seen pos={1} txnLen={2}", data, pos, txnLen);
                             return StsReady;   // MISO[0] of the status reply
                         }
+                        // Also handle RX header at pos==1 when previous byte was TX header's second byte
+                        // Host may do [0x42,0x00] + data in one burst, but RX is separate
+                        if (data == HeaderRx)
+                        {
+                            state = State.RxCountReq;
+                            this.Log(LogLevel.Noisy, "EM9305: RX header 0x{0:X2} seen at pos={1} (late)", data, pos);
+                            return StsReady;
+                        }
 
-                        this.Log(LogLevel.Warning, "EM9305: unexpected MOSI byte 0x{0:X2} while idle (ignored)", data);
+                        // 0x00 filler while idle is normal host polling for RDY (T_RDY hunt)
+                        // Don't warn for 0x00, just return 0x00
+                        if (data == 0x00)
+                        {
+                            return 0x00;
+                        }
+                        this.Log(LogLevel.Warning, "EM9305: unexpected MOSI byte 0x{0:X2} while idle (txnLen={1} txnBuf=[{2}] inTxn={3} csLow={4} state={5} cmdInProg={6})", data, txnLen, string.Join(",", txnBuf), inTxn, csLow, state, commandInProgress);
                         return 0x00;
 
                     case State.RxCountReq:
+                        this.Log(LogLevel.Noisy, "EM9305: RxCountReq pos={0} data=0x{1:X2} avail={2} state={3}", pos, data, rxTxFifo.Count, state);
                         int avail = rxTxFifo.Count;
                         bytesLeftToServe = avail;
-                        state = State.RxData;
-                        this.Log(LogLevel.Noisy, "EM9305: accepted RX header, {0} byte(s) available", avail);
+                        // Stay Idle when nothing is queued: lingering in RxData after an empty "ready"
+                        // made the next [0x81] hit State.RxData and return MISO[0]=0x00 instead of 0xC0.
+                        state = avail > 0 ? State.RxData : State.Idle;
+                        this.Log(LogLevel.Info, "EM9305: RxCountReq -> MISO count 0x{0:X2} ({1} avail) state={2}", (byte)(avail & 0xFF), avail, state);
                         return (byte)(avail & 0xFF);
 
                     case State.RxData:
                         if (rxTxFifo.Count > 0 && bytesLeftToServe > 0)
                         {
                             var outByte = rxTxFifo.Dequeue();
+                            this.Log(LogLevel.Noisy, "EM9305: RX data pos={0} -> MISO 0x{1:X2}", pos, outByte);
                             bytesLeftToServe--;
                             if (bytesLeftToServe == 0)
                             {
@@ -218,6 +239,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                             return outByte;
                         }
 
+                        this.Log(LogLevel.Info, "EM9305: RX read but nothing queued (fifo={0}) -> MISO 0x00", rxTxFifo.Count);
                         state = State.Idle;
                         return 0x00;
                 }
@@ -240,6 +262,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             inTxn = false;
 
             bool isTxHandshake = txnBuf.Count == 2 && txnBuf[0] == HeaderTx && txnBuf[1] == 0x00;
+            this.Log(LogLevel.Info, "FIN handshake={0} n={1} buf=[{2}] cmdInProg={3}", isTxHandshake, txnBuf.Count, string.Join(",", txnBuf), commandInProgress);
 
             if (isTxHandshake)
             {
@@ -271,10 +294,14 @@ namespace Antmicro.Renode.Peripherals.SPI
                 }
             }
 
-            if (state == State.RxCountReq)
-            {
-                state = State.Idle;   // dangling RX header with no data
-            }
+            // Do not reset RxCountReq here - the host does [0x81] + [0x00] as two
+            // separate single-byte transactions for the RX handshake. The first
+            // sets state to RxCountReq, the second should be handled as RxCountReq
+            // not Idle. Only reset if no RX header was seen (state should stay
+            // RxCountReq for the next transaction's second byte).
+            // The original dangling check was for a single-byte [0x81] with no follow-up,
+            // but in practice the host always does two bytes, so we keep the state.
+            // State will be handled in the next Transmit call's RxCountReq case.
 
             UpdateRdy();
         }
@@ -293,7 +320,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             bytesLeftToServe = 0;
             radioReady = false;
             booting = true;
-            Rdypin.Set(true);   // power-up value: SPI_RDY is pulled high first.
+            DriveRdy(true);   // power-up value: SPI_RDY is pulled high first.
 
             // Each EN pulse starts a fresh configuration-mode entry attempt (the host pulses EN
             // before every CM-entry square wave), so re-arm the CM edge counter for this cycle.
@@ -304,7 +331,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             // becomes available for the host to read.
             machine.ScheduleAction(TimeInterval.FromMilliseconds(1), _ =>
             {
-                Rdypin.Set(false);   // reset in progress
+                DriveRdy(false);   // reset in progress
 
                 machine.ScheduleAction(TimeInterval.FromMilliseconds(1), _ =>
                 {
@@ -594,6 +621,17 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
         }
 
+        private void DriveRdy(bool v)
+        {
+            if (v != rdyLast)
+            {
+                this.Log(LogLevel.Info, "EM9305: RDY -> {0}", v ? 1 : 0);
+                rdyLast = v;
+            }
+
+            Rdypin.Set(v);
+        }
+
         /// <summary>
         /// RDY = radio ready AND (currently selected OR data pending). During the boot window
         /// the pin is driven explicitly by the reset sequence instead.
@@ -604,8 +642,11 @@ namespace Antmicro.Renode.Peripherals.SPI
             {
                 return;   // reset sequence owns the pin for now
             }
-
-            Rdypin.Set(radioReady && (csLow || rxTxFifo.Count > 0));
+            // RDY is a "data available" line: assert only while there are bytes queued for the
+            // host in rxTxFifo, deassert once drained. am_devices_em9305_block_read() drains with
+            // `do {...} while(RDY)`; if RDY stayed high (radioReady) it re-polled [0x81], got 0 and
+            // returned NOT_READY(6). em9305_spi_begin only polls RDY for RX, so this is safe.
+            DriveRdy(rxTxFifo.Count > 0);
         }
 
         //***************************************************************************
@@ -736,6 +777,7 @@ namespace Antmicro.Renode.Peripherals.SPI
         private bool cmLastLevel;
         private int cmEdgeCount;
         private bool cmFiredThisEp;
+        private bool rdyLast = false;
 
         private byte[] deviceAddress;
         private byte[] localSupFeat;
