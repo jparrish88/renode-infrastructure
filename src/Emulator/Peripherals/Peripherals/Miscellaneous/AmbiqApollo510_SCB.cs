@@ -70,6 +70,23 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             return cpu;
         }
 
+        // Route system-exception pend requests (ICSR PENDSVSET / PENDSTSET) to the NVIC model.
+        // SetPendingIRQ takes the ARMv8-M exception number directly (PendSV=14, SysTick=15);
+        // internally NVIC maps system exceptions into its irq array.
+        private void PendSystemException(int exceptionNumber)
+        {
+            if (machine.TryGetByName<IRQControllers.NVIC>("sysbus.nvic", out var nvicController) ||
+                machine.TryGetByName<IRQControllers.NVIC>("nvic", out nvicController))
+            {
+                nvicController.SetPendingIRQ(exceptionNumber);
+                this.Log(LogLevel.Noisy, "[SCB] pended system exception {0}", exceptionNumber);
+            }
+            else
+            {
+                this.Log(LogLevel.Warning, "[SCB] NVIC not found - cannot forward ICSR pend");
+            }
+        }
+
         public uint ReadDoubleWord(long offset)
         {
             LogRead(offset);
@@ -143,6 +160,25 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
             switch (offset)
             {
+                case Icsr:
+                    // Forward interrupt-pend bits to the real NVIC. The generic CortexM does not expose
+                    // SCB->ICSR as MMIO here, so without this FreeRTOS' context switches (which write
+                    // ICSR bit28 PENDSVSET to request a PendSV) would be silently absorbed and the
+                    // scheduler would never switch away from the first task.
+                    if ((value & (1u << 28)) != 0u) // PENDSVSET
+                    {
+                        PendSystemException(14); // PendSV
+                        this.Log(LogLevel.Noisy, "[SCB] ICSR PENDSVSET -> NVIC");
+                    }
+
+                    if ((value & (1u << 26)) != 0u) // PENDSTSET
+                    {
+                        PendSystemException(15); // SysTick
+                        this.Log(LogLevel.Noisy, "[SCB] ICSR PENDSTSET -> NVIC");
+                    }
+
+                    break;
+
                 case Cpacr:
                     // FP access is enabled when TEN(bit2) and TSP(bit3) are cleared.
                     if ((value & 0x18u) == 0u)
@@ -210,21 +246,27 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 return "no fault bits";
             }
 
+            // CFSR layout (CMSIS SCB->CFSR):
+            //   MemManageStatus [7:0]:   IACCVIOL(0) DACCVIOL(1) SFTUNDEF(2) STKOF(3) UNALIGNED(4) MMARVALID(7)
+            //   BusFaultStatus  [15:8]:  IBUSERR(8) PRECISERR(9) IMPRECISERR(10) BFARVALID(15)
+            //   UsageFaultStatus[23:16]: DIVBYZERO(16) NOCP(17) UNDEFINSTR(18)
             var parts = new List<string>();
-            if ((cfsr & 0x1FFFu) != 0u)
-            {
-                parts.Add(string.Format("UsageFault=0x{0:X4}", cfsr & 0x1FFFu));
-            }
 
-            if ((cfsr & 0xFFFC0000u) != 0u)
-            {
-                parts.Add(string.Format("MemManage bits[25:16]=0x{0:X2} MMARVALID={1}", (cfsr >> 16) & 0xFFu, (cfsr & (1u << 7)) != 0u));
-            }
+            if ((cfsr & (1u << 7)) != 0u) { parts.Add("MMARVALID"); }
+            if ((cfsr & (1u << 4)) != 0u) { parts.Add("UNALIGNED(MM)"); }
+            if ((cfsr & (1u << 3)) != 0u) { parts.Add("STKOF(MM)"); }
+            if ((cfsr & (1u << 2)) != 0u) { parts.Add("SFTUNDEF(MM)"); }
+            if ((cfsr & (1u << 1)) != 0u) { parts.Add("DACCVIOL(MM)"); }
+            if ((cfsr & (1u << 0)) != 0u) { parts.Add("IACCVIOL(MM)"); }
 
-            if ((cfsr & 0x003F0000u) != 0u)
-            {
-                parts.Add(string.Format("BusFault bits[31:26]=0x{0:X2} BFARVALID={1}", (cfsr >> 26) & 0x3Fu, (cfsr & (1u << 1)) != 0u));
-            }
+            if ((cfsr & (1u << 15)) != 0u) { parts.Add("BFARVALID"); }
+            if ((cfsr & (1u << 10)) != 0u) { parts.Add("IMPRECISERR(BF)"); }
+            if ((cfsr & (1u << 9)) != 0u) { parts.Add("PRECISERR(BF)"); }
+            if ((cfsr & (1u << 8)) != 0u) { parts.Add("IBUSERR(BF)"); }
+
+            if ((cfsr & (1u << 18)) != 0u) { parts.Add("UNDEFINSTR(UF)"); }
+            if ((cfsr & (1u << 17)) != 0u) { parts.Add("NOCP(UF)"); }
+            if ((cfsr & (1u << 16)) != 0u) { parts.Add("DIVBYZERO(UF)"); }
 
             return string.Join(", ", parts);
         }
