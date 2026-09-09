@@ -6,6 +6,7 @@
 //
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Peripherals.SPI;
@@ -231,6 +232,57 @@ namespace Antmicro.Renode.PeripheralsTests
             Assert.AreEqual(cmd[totalBytes - 1], ReadNvmByte(addr + (uint)(dataLen - 1)), "last data byte (burst 2)");
         }
 
+        // Standard LE advertising: Set_Ad_Data then Set_Ad_Enable must cause an over-the-air ADV_Ind to be emitted,
+        // carrying the configured advertising data (here a complete local name "A510").
+        [Test]
+        public void SetAdDataThenEnableEmitsOverTheAirAdvInd()
+        {
+            byte[] air = null;
+            peripheral.AirFrameSent += f => { air = (byte[])f.Clone(); };
+
+            // Advertising data: Flags(len=2) + Complete Local Name "A510" (type 0x09, len = 1+4 = 5).
+            var adData = new byte[] { 0x02, 0x01, 0x06, 0x05, 0x09, 0x41, 0x35, 0x31, 0x30 };
+
+            // HCI_LE_Set_Ad_Data (0x2008): [type][op_lo=08][op_hi=20][plen][adData...]
+            TxHandshake();
+            var setAd = new List<byte> { 0x01, 0x08, 0x20, (byte)adData.Length };
+            setAd.AddRange(adData);
+            SendCommand(setAd.ToArray());
+
+            // HCI_LE_Set_Ad_Enable (0x200A): [type][op_lo=0A][op_hi=20][plen=1][enable=1] -> emits over the air.
+            TxHandshake();
+            SendCommand(new byte[] { 0x01, 0x0A, 0x20, 0x01, 0x01 });
+
+            Assert.IsNotNull(air, "Set_Ad_Enable must emit an over-the-air frame");
+
+            // BLESniffer framing: [wsIdx][sigPwr][noisePwr][aaOffenses][refAA x4][flags u16] then the raw air PDU.
+            Assert.AreEqual((byte)0x3f, air[8]);   // base flags 0x3C3F (an advertisement adds no PDU bit)
+            Assert.AreEqual((byte)0x3c, air[9]);
+
+            var pdu = air.Skip(10).ToArray();      // raw over-the-air ADV_Ind bytes
+            CollectionAssert.AreEqual(new byte[] { 0xD6, 0xBE, 0x89, 0x8E }, pdu.Take(4), "advertising access address");
+            Assert.AreEqual((pdu[4] & 0x0F), 0, "PDU type must be ADV_IND (legacy connectable undirected)");
+
+            // The advertising data region must carry the complete local name "A510".
+            Assert.IsTrue(Contains(pdu, new byte[] { 0x41, 0x35, 0x31, 0x30 }), "adv data must contain local name A510");
+        }
+
+        // Set_Ad_Data alone (no enable) emits nothing over the air.
+        [Test]
+        public void SetAdDataWithoutEnableEmitsNothing()
+        {
+            byte[] air = null;
+            peripheral.AirFrameSent += f => { air = (byte[])f.Clone(); };
+
+            var adData = new byte[] { 0x02, 0x01, 0x06 };
+            TxHandshake();
+            var setAd = new List<byte> { 0x01, 0x08, 0x20, (byte)adData.Length };
+            setAd.AddRange(adData);
+            SendCommand(setAd.ToArray());
+
+            Assert.IsNull(air, "no over-the-air frame should be emitted before Set_Ad_Enable");
+        }
+
         //***************************************************************************
         // Helpers that mirror the IOM transaction structure: every transfer ends with a
         // FinishTransmission() so the slave can classify each IOM transfer.
@@ -300,6 +352,25 @@ namespace Antmicro.Renode.PeripheralsTests
             var resp = ReadResponse();
 
             return resp[7];   // first payload byte of the Command Complete
+        }
+
+        private static bool Contains(byte[] haystack, byte[] needle)
+        {
+            for (int i = 0; i + needle.Length <= haystack.Length; i++)
+            {
+                int j = 0;
+                while (j < needle.Length && haystack[i + j] == needle[j])
+                {
+                    j++;
+                }
+
+                if (j == needle.Length)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 }

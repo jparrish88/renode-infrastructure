@@ -87,6 +87,13 @@ namespace Antmicro.Renode.Peripherals.SPI
         private const ushort OpcLeReadResolvingList    = 0x202A;
         private const ushort OpcLeReadMaxDataLength    = 0x202F;
 
+        // Standard LE advertising opcodes (answered so the host can drive real over-the-air ADV_Ind).
+        private const ushort OpcLeSetAdvParams     = 0x2006;
+        private const ushort OpcLeSetRandomAddr    = 0x2007;
+        private const ushort OpcLeSetAdvData       = 0x2008;
+        private const ushort OpcLeSetScanRspData   = 0x2009;
+        private const ushort OpcLeSetAdvEnable     = 0x200A;
+
         // Vendor-specific opcodes (OGF == 0x3F).
         private const ushort VscSetDevPubAddr   = 0xFC43;
         private const ushort VscCrcCalculate    = 0xFC4E;
@@ -143,6 +150,10 @@ namespace Antmicro.Renode.Peripherals.SPI
             cmEdgeCount = 0;
             cmFiredThisEp = false;
             cmLastLevel = false;
+            advActive = false;
+            advData = null;
+            advSeq = 0;
+            advChannel = 37;
             booting = true;   // RDY held at power-up reset value until EN is asserted.
             Rdypin.Set(true);
         }
@@ -358,6 +369,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             if (type == TypeCommand)
             {
                 this.Log(LogLevel.Info, "EM9305: HCI cmd opcode=0x{0:X4} param_len={1}", opcode, pkt[3]);
+                EmitCapture("TX", pkt);   // firmware -> radio: full H4 command frame [type][opc_lo][opc_hi][plen][params]
                 HandleCommand(opcode, pkt);
             }
             else
@@ -416,6 +428,43 @@ namespace Antmicro.Renode.Peripherals.SPI
 
                 case OpcLeReadMaxDataLength:
                     EnqueueCommandComplete(opcode, 0x00, new byte[] { 0xC0, 0x03, 0xC0, 0x03 });   // tx/rx octets
+                    break;
+
+                case OpcLeSetAdvParams:   // [advIntMin u16][advIntMax u16][type][txAddr][chanMap ...]
+                    EnqueueCommandComplete(opcode, 0x00);
+                    break;
+
+                case OpcLeSetRandomAddr:  // [random address 6 bytes] (advertise the public deviceAddress instead)
+                    EnqueueCommandComplete(opcode, 0x00);
+                    break;
+
+                case OpcLeSetAdvData:     // HCI params are the raw advertising data (no inner length byte).
+                    {
+                        int alen = Math.Min((int)cmd[3], cmd.Length - 4);   // plen, clamped to what arrived
+                        if (alen < 0)
+                        {
+                            alen = 0;
+                        }
+
+                        advData = new byte[alen];
+                        Array.Copy(cmd, 4, advData, 0, alen);              // params start at index 4
+                        this.Log(LogLevel.Info, "EM9305: Set Advertising Data len={0}", alen);
+                    }
+
+                    EnqueueCommandComplete(opcode, 0x00);
+                    break;
+
+                case OpcLeSetScanRspData: // [length u8][scan response data ...] (not needed for ADV_Ind)
+                    EnqueueCommandComplete(opcode, 0x00);
+                    break;
+
+                case OpcLeSetAdvEnable:   // [enable u8]: 1 = start advertising
+                    if (cmd.Length >= 5)
+                    {
+                        StartAdvertising(cmd[4] != 0);
+                    }
+
+                    EnqueueCommandComplete(opcode, 0x00);
                     break;
 
                 default:
@@ -540,8 +589,26 @@ namespace Antmicro.Renode.Peripherals.SPI
 
         private void EnqueueData(IEnumerable<byte> data)
         {
+            byte[] arr;
+            if (data is byte[] existing)
+            {
+                arr = existing;
+            }
+            else
+            {
+                var list = new List<byte>(data);
+                arr = list.ToArray();
+            }
+
+            // Every enqueued packet is a complete HCI event already framed with its H4 type byte
+            // ([type=0x04][evt_code][plen][...]); emit it so the host<->radio traffic can be captured.
+            if (arr.Length > 0 && arr[0] >= 1 && arr[0] <= 4)
+            {
+                EmitCapture("RX", arr);   // radio -> firmware: full H4 event frame
+            }
+
             int n = 0;
-            foreach (var b in data)
+            foreach (var b in arr)
             {
                 rxTxFifo.Enqueue(b);
                 n++;
@@ -549,6 +616,121 @@ namespace Antmicro.Renode.Peripherals.SPI
 
             UpdateRdy();
             this.Log(LogLevel.Noisy, "EM9305: enqueued {0} byte(s), fifo={1}", n, rxTxFifo.Count);
+        }
+
+        //***************************************************************************
+        //
+        /// <summary>
+        /// Emit a structured capture line for one complete HCI-over-SPI frame. The run harness parses
+        /// these lines and reassembles them into a Bluetooth-HCI (DLT 103, H4) .pcapng viewable in Wireshark.
+        /// Format: EM9305CAP &lt;TX|RX&gt; &lt;hex bytes of the full H4 frame&gt;.
+        /// </summary>
+        private void EmitCapture(string dir, byte[] frame)
+        {
+            var hex = new char[frame.Length * 2];
+            for (int i = 0; i < frame.Length; i++)
+            {
+                hex[i * 2] = "0123456789ABCDEF"[frame[i] >> 4];
+                hex[i * 2 + 1] = "0123456789ABCDEF"[frame[i] & 0x0F];
+            }
+
+            this.Log(LogLevel.Info, "EM9305CAP {0} {1}", dir, new string(hex));
+        }
+
+        //***************************************************************************
+        // Over-the-air advertising. When the host enables standard LE advertising with data, the model emits a
+        // legacy ADV_Ind link-layer frame on an advertising channel and logs it as an EM9305AIR line (BLESniffer-style
+        // 10-byte metadata prefix + raw air bytes). The run harness turns those lines into a Bluetooth-LE linklayer pcap
+        // so Wireshark dissects the OTA PDU layer per example.
+        //***************************************************************************
+        private void StartAdvertising(bool enable)
+        {
+            if (!enable)
+            {
+                advActive = false;
+                this.Log(LogLevel.Info, "EM9305: advertising disabled");
+                return;
+            }
+
+            if (advData == null || advData.Length == 0)
+            {
+                // No advertising data set yet; emit a minimal valid AD structure so the PDU is well-formed.
+                advData = new byte[] { 0x02, 0x01, 0x82 };
+            }
+
+            advActive = true;
+            this.Log(LogLevel.Info, "EM9305: advertising enabled -> emitting ADV_Ind over the air");
+            SendAdvertisement();
+        }
+
+        private void SendAdvertisement()
+        {
+            if (!advActive || advData == null)
+            {
+                return;
+            }
+
+            advChannel = 37 + (advSeq % 3);   // hop across the three advertising channels (37/38/39)
+            EmitAirFrame(BuildAdvIndFrame());
+            advSeq++;
+
+            // Reschedule the next advertisement. Scheduling needs a running time source; when the peripheral is driven
+            // outside an active emulation (e.g. unit tests) this is best-effort and skipped silently.
+            try
+            {
+                machine.ScheduleAction(TimeInterval.FromMilliseconds(40), _ => SendAdvertisement(), "em9305-adv");
+            }
+            catch (Exception)
+            {
+                // Not emulating -- a single advertisement has already been emitted; nothing to reschedule.
+            }
+        }
+
+        // Legacy ADV_Ind link-layer frame: AA(D6 BE 89 8E) + PDU header (0x02 = ADV_Ind, public addr) + AdvA(6) + AdvData.
+        private byte[] BuildAdvIndFrame()
+        {
+            var frame = new byte[11 + advData.Length];
+            frame[0] = 0xD6;
+            frame[1] = 0xBE;
+            frame[2] = 0x89;
+            frame[3] = 0x8E;                       // advertising access address (little-endian on air)
+            frame[4] = 0x00;                        // LL PDU header: PDU type ADV_IND (0), public device address
+            Array.Copy(deviceAddress, 0, frame, 5, 6);    // AdvA
+            Array.Copy(advData, 0, frame, 11, advData.Length);   // Advertising Data (AD structures)
+            return frame;
+        }
+
+        private void EmitAirFrame(byte[] airFrame)
+        {
+            var framed = FrameWithSnifferHeader(airFrame);
+            var hex = new char[framed.Length * 2];
+            for (int i = 0; i < framed.Length; i++)
+            {
+                hex[i * 2] = "0123456789ABCDEF"[framed[i] >> 4];
+                hex[i * 2 + 1] = "0123456789ABCDEF"[framed[i] & 0x0F];
+            }
+
+            this.Log(LogLevel.Info, "EM9305AIR {0}", new string(hex));
+            AirFrameSent?.Invoke(framed);
+        }
+
+        // Mirrors BLESniffer.InsertHeaderToPacket() for the legacy-advertising case (access address == 0x8E89BED6): a 10-byte
+        // Ubertooth-style metadata prefix ([chanIdx][signalPwr][noisePwr][aaOffenses][refAA x4][flags u16]) followed by the raw
+        // over-the-air PDU. This is exactly what Renode writes into its native BLE tap, so a linktype-256 pcap built from these
+        // frames dissects identically in Wireshark's Bluetooth-LE dissector.
+        private byte[] FrameWithSnifferHeader(byte[] airFrame)
+        {
+            var outPkt = new byte[airFrame.Length + 10];
+            outPkt[0] = (byte)(advChannel == 37 ? 0 : (advChannel == 38 ? 12 : 39));   // Wireshark channel index
+            outPkt[1] = 0x00;     // signal power
+            outPkt[2] = 0x00;     // noise power
+            outPkt[3] = 0x00;     // access address offenses
+            Array.Copy(airFrame, 0, outPkt, 4, 4);   // reference access address (AA)
+            ushort flags = 0x3C3F;                    // BLESniffer advertisement flag set (Advertisement bit stays clear)
+            outPkt[8] = (byte)(flags & 0xFF);
+            outPkt[9] = (byte)((flags >> 8) & 0xFF);
+            Array.Copy(airFrame, 0, outPkt, 10, airFrame.Length);   // raw over-the-air PDU bytes
+            return outPkt;
         }
 
         //***************************************************************************
@@ -567,8 +749,10 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
             else if (number == CsBall)
             {
-                csLow = value;
-                this.Log(LogLevel.Noisy, "EM9305: CS {0}", value ? "asserted" : "released");
+                // EM9305 SPI CS is ACTIVE-LOW: am_devices_em9305 selects with OUTPUT_CLEAR (ball low)
+                // and deselects with OUTPUT_SET (ball high). So "selected" == pin LOW.
+                csLow = !value;
+                this.Log(LogLevel.Noisy, "EM9305: CS {0}", value ? "released" : "asserted");
                 UpdateRdy();
             }
             else if (number == CmBall)
@@ -633,8 +817,13 @@ namespace Antmicro.Renode.Peripherals.SPI
         }
 
         /// <summary>
-        /// RDY = radio ready AND (currently selected OR data pending). During the boot window
-        /// the pin is driven explicitly by the reset sequence instead.
+        /// RDY/SPI_RDY is the "device present & ready" line: it must read HIGH whenever the radio is up
+        /// and in active state so that am_devices_em9305_tx_starts()/em9305_spi_begin() can start a WRITE
+        /// handshake (it asserts CS then polls RDY until high). Holding it low while idle made every
+        /// command write time out before the 0x42 header was even sent, so no HCI command ever went out.
+        /// "No data" for reads is signalled by the MISO count byte being 0 (block_read then returns
+        /// NOT_READY after a bounded retry), not by deasserting RDY. During the boot window the reset
+        /// sequence drives the pin explicitly instead.
         /// </summary>
         private void UpdateRdy()
         {
@@ -642,11 +831,16 @@ namespace Antmicro.Renode.Peripherals.SPI
             {
                 return;   // reset sequence owns the pin for now
             }
-            // RDY is a "data available" line: assert only while there are bytes queued for the
-            // host in rxTxFifo, deassert once drained. am_devices_em9305_block_read() drains with
-            // `do {...} while(RDY)`; if RDY stayed high (radioReady) it re-polled [0x81], got 0 and
-            // returned NOT_READY(6). em9305_spi_begin only polls RDY for RX, so this is safe.
-            DriveRdy(rxTxFifo.Count > 0);
+
+            // SPI_RDY is asserted high in two distinct situations:
+            //  - "data available": while the RX FIFO holds an unread event/response. block_read's
+            //    `do{...}while(RDY)` re-checks RDY only after EM9305_SPI_DEVICE_DESELECT() (CSN
+            //    deasserted), so at that point csLow is false and RDY correctly drops once drained.
+            //  - "write ready": while CSN is asserted (a host block_write has selected the radio).
+            //    am_devices_em9305_tx_starts()/em9305_spi_begin() asserts CS then polls RDY until it
+            //    goes high before clocking the [0x42] header; with an empty FIFO holding RDY low made
+            //    every command write time out, so no HCI command ever went out.
+            DriveRdy(rxTxFifo.Count > 0 || csLow);
         }
 
         //***************************************************************************
@@ -783,5 +977,15 @@ namespace Antmicro.Renode.Peripherals.SPI
         private byte[] localSupFeat;
         private uint randState = 0x1234_5678u;
         private byte[] nvm;   // lazy NVM/flash, allocated on first firmware-update access
+
+        // Standard-LE advertising state (drives the over-the-air ADV_Ind capture path).
+        private byte[] advData;      // advertising AD structures from Set Advertising Data
+        private bool advActive;      // true while Set Advertising Enable(1) is in effect
+        private int advSeq;          // counts emitted advertisements (for channel hopping)
+        private int advChannel = 37; // current advertising channel (hops across 37/38/39)
+
+        // Raised with a BLESniffer-framed record each time an over-the-air PDU is emitted, so tests and external
+        // consumers can observe the air frames directly instead of parsing EM9305AIR log text. Same bytes as logged.
+        public event Action<byte[]> AirFrameSent;
     }
 }
