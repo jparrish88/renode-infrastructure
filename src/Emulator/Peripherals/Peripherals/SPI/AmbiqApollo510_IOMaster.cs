@@ -1343,8 +1343,10 @@ namespace Antmicro.Renode.Peripherals.SPI
                     throw new ArgumentException($"Cannot push; the {name} is full!");
                 }
                 tailIndex = (tailIndex + 1) % DoubleWordCapacity;
-                Count++;
+                // Store before signalling: Count++ fires CountChangeAction, which may immediately
+                // pop/read this same slot. Writing first guarantees observers see valid data.
                 memory[tailIndex] = value;
+                Count++;
             }
 
             private void SoftwareReset()

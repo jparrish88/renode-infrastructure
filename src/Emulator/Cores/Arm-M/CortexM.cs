@@ -913,6 +913,32 @@ namespace Antmicro.Renode.Peripherals.CPU
                 value += 1;
             }
             pcNotInitialized = false;
+            // DIAGNOSTIC: log any branch/PC-write that targets DTCM (code should never run from RAM).
+            if((value & 0xFF000000u) == 0x20000000u && value < 0x20080000u)
+            {
+                try
+                {
+                    var sb = new System.Text.StringBuilder();
+                    foreach(var reg in GetRegisters())
+                    {
+                        try
+                        {
+                            ulong v;
+                            if(reg.Width == 32) { v = (uint)GetRegister(reg.Index); }
+                            else if(reg.Width == 16) { v = (ushort)GetRegister(reg.Index); }
+                            else if(reg.Width == 8) { v = (byte)GetRegister(reg.Index); }
+                            else { v = (ulong)GetRegister(reg.Index); }
+                            sb.Append(reg.ToString()).Append('=').Append("0x").Append(v.ToString("X")).Append(' ');
+                        }
+                        catch { }
+                    }
+                    this.Log(LogLevel.Error, "BRANCH-TO-DTCM target=0x{0:X} :: {1}", value, sb.ToString());
+                }
+                catch(Exception ex)
+                {
+                    this.Log(LogLevel.Warning, "branch-to-dtcm dump failed: {0}", ex.Message);
+                }
+            }
             return base.BeforePCWrite(value);
         }
 

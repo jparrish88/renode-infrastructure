@@ -1753,6 +1753,42 @@ namespace Antmicro.Renode.Peripherals.CPU
         private void ReportAbort(string message)
         {
             this.Log(LogLevel.Error, "CPU abort [PC=0x{0:X}]: {1}.", PC.RawValue, message);
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                foreach(var reg in GetRegisters())
+                {
+                    try
+                    {
+                        ulong v;
+                        if(reg.Width == 32)
+                        {
+                            v = (uint)GetRegister(reg.Index);
+                        }
+                        else if(reg.Width == 16)
+                        {
+                            v = (ushort)GetRegister(reg.Index);
+                        }
+                        else if(reg.Width == 8)
+                        {
+                            v = (byte)GetRegister(reg.Index);
+                        }
+                        else
+                        {
+                            v = (ulong)GetRegister(reg.Index);
+                        }
+                        sb.Append(reg.ToString()).Append('=').Append("0x").Append(v.ToString("X")).Append(' ');
+                    }
+                    catch
+                    {
+                    }
+                }
+                this.Log(LogLevel.Error, "CPU abort registers: PC=0x{0:X} :: {1}", (ulong)PC.RawValue, sb.ToString());
+            }
+            catch(Exception ex)
+            {
+                this.Log(LogLevel.Warning, "Failed to dump registers at abort: {0}", ex.Message);
+            }
             /* If the trace writer runs asynchronyously, we need to disable it.
              * Otherwise it might catch the CpuAbortException when we cross the tlib boundary
              * since the tracer can read emulated CPU registers (tlib callbacks)
