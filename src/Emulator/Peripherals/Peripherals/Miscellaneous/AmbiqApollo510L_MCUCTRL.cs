@@ -114,7 +114,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         Registers.SDIO0CTRL.Define(this, 0x454).WithValueField(0, 32, name: "SDIO0CTRL", valueProviderCallback: _ => 0x1080);
         Registers.SDIO1CTRL.Define(this, 0x458).WithValueField(0, 32, name: "SDIO1CTRL", valueProviderCallback: _ => 0x1080);
         Registers.PDMCTRL.Define(this, 0x45C).WithValueField(0, 32, name: "PDMCTRL", valueProviderCallback: _ => 0x1);
-        Registers.DSIBIST.Define(this, 0x4A0).WithValueField(0, 32, name: "DSIBIST", valueProviderCallback: _ => 0x404);
+        Registers.DSIBIST.Define(this, 0x4A0).WithValueField(0, 32, name: "DSIBIST", valueProviderCallback: _ => 0x10000404); // SVD 0x404 + DSIBISTERRRXHS[28]: am_hal_dsi_wait_stop_state polls for bit28==1 (lanes quiescent in sim)
         Registers.SSRAMMISCCTRL.Define(this, 0x4A4).WithValueField(0, 32, name: "SSRAMMISCCTRL", valueProviderCallback: _ => 0x7);
         Registers.DISPSTATUS.Define(this, 0x4B0).WithValueField(0, 32, name: "DISPSTATUS", valueProviderCallback: _ => 0x0);
         Registers.CPUCFG.Define(this, 0x4CC).WithValueField(0, 32, name: "CPUCFG", valueProviderCallback: _ => 0x0);
