@@ -79,8 +79,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             switch(offset)
             {
                 case REG_STATUS:      return statusReg;
-                case REG_CLID:        return (uint)lastClId;
-                case REG_INTERRUPT:   return interruptReg;
+                case REG_CLID:        this.Log(LogLevel.Noisy, "GPU RD CLID -> {0}", lastClId); return (uint)lastClId;
+                case REG_INTERRUPT:   this.Log(LogLevel.Noisy, "GPU RD INTERRUPT -> {0}", interruptReg); return interruptReg;
                 case REG_CMDADDR:     return cmdAddrLow;
                 case REG_CMDSIZE:     return cmdSize;
                 case REG_IDREG:       return 0x4E454D41; // "NEMA" placeholder
@@ -123,6 +123,14 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     if(cmdSize != 0 && cmdAddrLow != 0) RaiseIRQ();
                     break;
 
+                case REG_CMDRINGSTOP:
+                    // Ringbuffer doorbell: nema_rb_force_flush() writes the updated
+                    // stop pointer here after queueing a CL (CLID + INTERRUPT inline
+                    // cmds live in the SRAM ring, so this write is the only MMIO
+                    // sign of a frame submit). Complete one CL like RaiseIRQ().
+                    this.Log(LogLevel.Info, "GPU WR CMDRINGSTOP <- 0x{0:X} (ringbuffer submit, complete CL)", value);
+                    RaiseIRQ();
+                    break;
                 case REG_CONFIG:
                 case REG_BURST_SIZE:
                 case REG_BREAKPOINT:

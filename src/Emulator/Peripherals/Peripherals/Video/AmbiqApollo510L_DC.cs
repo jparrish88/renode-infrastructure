@@ -57,11 +57,14 @@ namespace Antmicro.Renode.Peripherals.Video
 
         private const uint TEBit = 1u << 3;
         private const uint FrameDoneBits = 3u << 4;
+        private const uint OneFrameBit = 1u << 17; // NEMADC_ONE_FRAME (nema_dc.h)
         // Panel refresh: 60 Hz (16.67 ms period) for vsync free-run and TE.
         private const ulong RefreshFrequencyHz = 60;
 
         private uint statusReg = 0;
         private uint interruptReg = 0;
+        private uint modeReg = 0;
+        private uint interfaceCfgReg = 0;
         private uint layer0Base = 0;
         private bool teArmed = false;
         private readonly LimitTimer refreshTimer;
@@ -82,6 +85,8 @@ namespace Antmicro.Renode.Peripherals.Video
             teArmed = false;
             statusReg = 0;
             interruptReg = 0;
+            modeReg = 0;
+            interfaceCfgReg = 0;
             layer0Base = 0;
             IRQ.Unset();
         }
@@ -94,14 +99,15 @@ namespace Antmicro.Renode.Peripherals.Video
             {
                 case REG_STATUS:    return statusReg; // wait_dbi_idle polls STATUS & mask == 0 -> 0 = idle passes
                 case REG_INTERRUPT: return interruptReg; // unmasked: TE bit3 visible (unlike 510 model)
+                case REG_MODE:      return modeReg;
+                case REG_INTERFACE_CFG: return interfaceCfgReg;
                 case REG_LAYER0_BASEADDR: return layer0Base;
                 case 0xF4: // NEMADC_REG_IDREG: nemadc_init() (prebuilt lib) reads IDREG
                             // and returns FAILURE unless it equals 0x87452365 (see
                             // disassembly). Without this, display init aborts.
                     return 0x87452365;
                 default:
-                    // TEMP full trace (revert after graphics bring-up).
-                    this.Log(LogLevel.Info, "DC RD 0x{0:X}", offset);
+                    this.Log(LogLevel.Noisy, "DC RD 0x{0:X}", offset);
                     if(offset < 0x200) return 0; // accept all layer/mode regs
                     return 0;
             }
@@ -130,8 +136,9 @@ namespace Antmicro.Renode.Peripherals.Video
                     this.Log(LogLevel.Noisy, "DC WR INTERRUPT <- 0x{0:X}", value);
                     break;
                 case REG_MODE:
-                    this.Log(LogLevel.Info, "DC WR MODE <- 0x{0:X} {1}", value, (value & 1) !=0 ? "ONE_FRAME" : "NORMAL");
-                    if((value & 1) != 0)
+                    modeReg = value;
+                    this.Log(LogLevel.Info, "DC WR MODE <- 0x{0:X} {1}", value, (value & OneFrameBit) !=0 ? "ONE_FRAME" : "NORMAL");
+                    if((value & OneFrameBit) != 0) // NEMADC_ONE_FRAME is bit17, not bit0
                     {
                         statusReg = 0;
                         CompleteFrame();
@@ -141,13 +148,16 @@ namespace Antmicro.Renode.Peripherals.Video
                         statusReg = 0;
                     }
                     break;
+                case REG_INTERFACE_CFG:
+                    interfaceCfgReg = value;
+                    this.Log(LogLevel.Info, "DC WR IFCFG <- 0x{0:X}", value);
+                    break;
                 case REG_LAYER0_BASEADDR:
                     layer0Base = value;
                     this.Log(LogLevel.Info, "DC WR L0 BASE <- 0x{0:X} (FB phys from g_sFrameBuffer.bo.base_phys)", value);
                     break;
                 default:
-                    // TEMP full trace (revert after graphics bring-up).
-                    this.Log(LogLevel.Info, "DC WR 0x{0:X} <- 0x{1:X}", offset, value);
+                    this.Log(LogLevel.Noisy, "DC WR 0x{0:X} <- 0x{1:X}", offset, value);
                     break;
             }
         }
