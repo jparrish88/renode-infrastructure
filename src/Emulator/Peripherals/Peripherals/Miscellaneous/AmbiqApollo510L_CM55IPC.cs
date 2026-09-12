@@ -92,6 +92,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             nsPollTimer.Enabled = false;
             nsTotalInjections = 0;
             nsInjectedThisGeneration = false;
+            rxVringLatched = false;
+            rxVringAddr = 0;
+            txVringAddr = 0;
+            vringNum = 0;
             m2dThreshold = 1;
             d2mThreshold = 1;
             m2dFullError = false;
@@ -242,7 +246,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 }
                 else
                 {
-                    this.Log(LogLevel.Info, "IPC: unknown M2D signal 0x{0:X}, dropping (RPMsg comes later)", signal);
+                    // Single-word kicks (e.g. MSG_M2D TX notify) and future
+                    // RPMsg traffic: log kicks, snoop TX sends below.
+                    if(signal == SigMsgM2D)
+                    {
+                        TrySnoopTx();
+                    }
+                    else
+                    {
+                        this.Log(LogLevel.Info, "IPC: unknown M2D signal 0x{0:X}, dropping (RPMsg comes later)", signal);
+                    }
                     m2dMsg.RemoveAt(0);
                     if(m2dFifo.Count > 0)
                     {
@@ -315,6 +328,24 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private const int NsMaxInjections = 5;
         private bool nsInjectedThisGeneration;
         private int nsTotalInjections;
+        // Deferred RPMsg responses (SYS/HCI): answering synchronously inside
+        // the SEND's kick wins a race with sender bookkeeping (pending opcode
+        // not yet stored, HciHandler queue not yet armed) and gets dropped.
+        // Queue them; flush on the poll tick (>=5ms later, sender settled).
+        private readonly Queue<Tuple<uint, byte[], string>> rxPending = new Queue<Tuple<uint, byte[], string>>();
+        private readonly Random randomGen = new Random();
+        private bool rxVringLatched;
+        // Last discovered vring geometry (HOST-RX inject target + HOST-TX snoop).
+        private ulong rxVringAddr;
+        private ulong txVringAddr;
+        private uint vringNum;
+        private uint vringBufSize;
+        private uint lastTxAvail;
+        private ulong rxBufsBaseAddr;
+        private ulong rxBufsSizeBytes;
+        private uint rxNextAvail;
+        private uint hostEptAddr = 0x400;
+        private const uint RpmsgMyAddr = 1024;
         private IFlagRegisterField m2dThresholdIrqEnField;
         private IFlagRegisterField m2dErrorIrqEnField;
         private IFlagRegisterField d2mThresholdIrqEnField;
@@ -337,6 +368,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private const uint RpmsgNsAddr = 0x35;
         private const uint RpmsgNsAnnounceAddr = 1024;
         private const uint SigMsgD2M = 0xA869;
+        private const uint SigMsgM2D = 0xA868;
         private const int MemAlignment = 32;
         private const int VringCount = 2;
         private const int VdevStatusSize = 32;
@@ -348,13 +380,33 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private void OnNsPoll()
         {
             TryInjectNsAnnouncement();
+            // The HOST suppresses TX kicks once flowing (avail event flags),
+            // so poll TX here too; TrySnoopTx is silent when idle.
+            TrySnoopTx();
+            // Flush deferred responses in order; stop on first uninjectable
+            // (no RX buffer yet) to preserve ordering.
+            int flushGuard = 0;
+            while(rxPending.Count > 0 && flushGuard++ < 8)
+            {
+                var item = rxPending.Peek();
+                if(!InjectRxFrame(item.Item1, item.Item2, item.Item3))
+                {
+                    break;
+                }
+                rxPending.Dequeue();
+            }
             if(nsPollLogCountdown > 0)
             {
                 nsPollLogCountdown--;
             }
+            if(txPollLogCountdown > 0)
+            {
+                txPollLogCountdown--;
+            }
         }
 
         private int nsPollLogCountdown;
+        private int txPollLogCountdown;
 
         private static ulong RoundUp(ulong x, ulong align)
         {
@@ -414,17 +466,48 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             // into exactly one of them. Follow the posted one (naming varies).
             ulong rxCandVring = bufsBase + (ulong)VringCount * vqRingSize;
             ulong txCandVring = RoundUp(rxCandVring + VringSize(num), MemAlignment);
-            // HOST-RX buffers always come from region 1; the posted control
-            // vring is picked by avail (naming varies by backend version).
+            // NOTE: backend_data.vr confirms rx_addr=rxCand, tx_addr=txCand,
+            // but the HOST posts its RX buffers into txCand's vring (and TX
+            // sends go through rxCand's). Follow actual usage, not names:
+            // the INJECT target is the vring with posted RX buffers.
             ulong rxBufsBase = bufsBase;
             ulong rxBufsSize = vqRingSize;
             ulong rxVring = rxCandVring;
             uint availAtRx = ReadU16(rxCandVring + (ulong)num * 16 + 2);
             uint availAtTx = ReadU16(txCandVring + (ulong)num * 16 + 2);
-            if(availAtTx >= num && availAtRx < num)
+            if(!rxVringLatched)
             {
-                rxVring = txCandVring;
+                // Latch once per boot: the first vring to show a full set of
+                // posted buffers is HOST-RX (TX sends start much later, after
+                // bind). Never re-pick: later TX traffic must not flip roles.
+                ulong picked;
+                if(availAtTx >= num && availAtRx < num)
+                {
+                    picked = txCandVring;
+                }
+                else if(availAtRx >= num && availAtTx < num)
+                {
+                    picked = rxCandVring;
+                }
+                else
+                {
+                    return;
+                }
+                rxVringAddr = picked;
+                txVringAddr = (picked == rxCandVring) ? txCandVring : rxCandVring;
+                vringNum = num;
+                vringBufSize = bufSize;
+                rxBufsBaseAddr = bufsBase;
+                rxBufsSizeBytes = vqRingSize;
+                rxVringLatched = true;
+                this.Log(LogLevel.Info, "IPC: latched HOST-RX vring=0x{0:X}", picked);
             }
+            // From here on, use ONLY latched geometry (locals above are stale).
+            num = vringNum;
+            bufSize = vringBufSize;
+            rxVring = rxVringAddr;
+            rxBufsBase = rxBufsBaseAddr;
+            rxBufsSize = rxBufsSizeBytes;
             // RX vring: desc[num] (16B each), avail {flags,idx,ring[num]} at +num*16,
             // used {flags,idx,ring[num]x8B} ALIGNED (vring_init aligns used).
             ulong availIdxAddr = rxVring + (ulong)num * 16 + 2;
@@ -471,30 +554,257 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 this.Log(LogLevel.Warning, "IPC: RX desc {0} points outside RX bufs (0x{1:X})", descId, bufAddr);
                 return;
             }
-            // Payload: rpmsg_hdr + ns_msg("am_ipc").
-            var payload = new byte[56];
-            Array.Copy(BitConverter.GetBytes(RpmsgNsAnnounceAddr), 0, payload, 0, 4); // src
-            Array.Copy(BitConverter.GetBytes(RpmsgNsAddr), 0, payload, 4, 4); // dst = NS
-            // reserved (8..11) = 0, len = 40 (12..13), flags (14..15) = 0
-            Array.Copy(BitConverter.GetBytes((ushort)40), 0, payload, 12, 2);
+            // Payload: ns_msg("am_ipc").
+            var nsPayload = new byte[40];
             var nameBytes = System.Text.Encoding.ASCII.GetBytes("am_ipc");
-            Array.Copy(nameBytes, 0, payload, 16, nameBytes.Length);
-            Array.Copy(BitConverter.GetBytes(RpmsgNsAnnounceAddr), 0, payload, 48, 4); // ns addr
-            // ns flags (52..55) = CREATE(0)
-            Sysbus.WriteBytes(payload, bufAddr);
+            Array.Copy(nameBytes, 0, nsPayload, 0, nameBytes.Length);
+            Array.Copy(BitConverter.GetBytes(RpmsgNsAnnounceAddr), 0, nsPayload, 32, 4);
+            // ns flags (36..39) = CREATE(0)
+            if(InjectRxFrame(RpmsgNsAddr, nsPayload, "NS announce 'am_ipc'"))
+            {
+                nsInjectedThisGeneration = true;
+                nsTotalInjections++;
+            }
+        }
+
+        // Place one RPMsg frame (16B hdr + payload) into the next HOST-RX
+        // buffer, advance RX used, and kick via D2M + PEND_MSG IRQ. Returns
+        // false when no usable buffer is available (caller retries later).
+        private bool InjectRxFrame(uint dst, byte[] payload, string what)
+        {
+            uint num = vringNum;
+            if(num == 0 || rxVringAddr == 0 || payload == null)
+            {
+                return false;
+            }
+            if(payload.Length + 16 > vringBufSize)
+            {
+                this.Log(LogLevel.Warning, "IPC: RX frame too big ({0})", payload.Length);
+                return true; // drop, do not spin
+            }
+            ulong usedBaseAddr = RoundUp(rxVringAddr + (ulong)num * 16 + 4 + (ulong)num * 2, MemAlignment);
+            ulong usedIdxAddr = usedBaseAddr + 2;
+            uint usedIdx = ReadU16(usedIdxAddr);
+            uint slot = usedIdx % num;
+            uint descId = ReadU16(rxVringAddr + (ulong)num * 16 + 4 + (ulong)slot * 2);
+            if(descId >= num)
+            {
+                this.Log(LogLevel.Warning, "IPC: RX avail slot {0} has insane desc {1}", slot, descId);
+                return false;
+            }
+            ulong bufAddr = ReadU64(rxVringAddr + (ulong)descId * 16);
+            if(bufAddr < rxBufsBaseAddr || bufAddr + (ulong)payload.Length + 16 > rxBufsBaseAddr + rxBufsSizeBytes)
+            {
+                this.Log(LogLevel.Warning, "IPC: RX desc {0} points outside RX bufs (0x{1:X})", descId, bufAddr);
+                return false;
+            }
+            var frame = new byte[payload.Length + 16];
+            Array.Copy(BitConverter.GetBytes(RpmsgMyAddr), 0, frame, 0, 4); // src
+            Array.Copy(BitConverter.GetBytes(dst), 0, frame, 4, 4);
+            // reserved (8..11) = 0, len (12..13), flags (14..15) = 0
+            Array.Copy(BitConverter.GetBytes((ushort)payload.Length), 0, frame, 12, 2);
+            Array.Copy(payload, 0, frame, 16, payload.Length);
+            Sysbus.WriteBytes(frame, bufAddr);
             ulong usedRingBase = usedBaseAddr + 4;
             WriteU32(usedRingBase + (ulong)slot * 8, descId);
-            WriteU32(usedRingBase + (ulong)slot * 8 + 4, 56);
+            WriteU32(usedRingBase + (ulong)slot * 8 + 4, (uint)frame.Length);
             WriteU16(usedIdxAddr, (ushort)(usedIdx + 1));
-            nsInjectedThisGeneration = true;
-            nsTotalInjections++;
+            rxNextAvail++;
             // Kick the HOST: D2M signal + PEND_MSG IRQ (and polled paths).
             d2mFifo.Enqueue(SigMsgD2M);
             UpdateIRQ();
-            this.Log(LogLevel.Info, "IPC: injected NS announce 'am_ipc' (desc {0} buf 0x{1:X}, used {2}->{3}), kicked D2M", descId, bufAddr, usedIdx, usedIdx + 1);
+            this.Log(LogLevel.Info, "IPC RX inject {0} (desc {1} buf 0x{2:X}, {3}B)", what, descId, bufAddr, frame.Length);
+            return true;
         }
 
         private IBusController Sysbus => machine.GetSystemBus(this);
+
+        // Emulated-CM4 TX consumption: the HOST posts sends into its TX vring
+        // and kicks via M2D. Drain newly posted entries, log their payload
+        // heads (opmode/HCI flow), and advance TX used so the HOST keeps
+        // flowing. No kick: the HOST reaps TX completions by polling used.
+        private void TrySnoopTx()
+        {
+            uint num = vringNum;
+            if(num == 0 || txVringAddr == 0)
+            {
+                return;
+            }
+            uint txAvail = ReadU16(txVringAddr + (ulong)num * 16 + 2);
+            ulong txUsedBase = RoundUp(txVringAddr + (ulong)num * 16 + 4 + (ulong)num * 2, MemAlignment);
+            if(lastTxAvail > txAvail)
+            {
+                // Vring generation reset (re-init zeroes avail) or counter wrap:
+                // resync instead of spinning past all future entries.
+                this.Log(LogLevel.Info, "IPC: TX avail resync {0}->{1}", lastTxAvail, txAvail);
+                lastTxAvail = txAvail;
+            }
+            if(txPollLogCountdown == 0)
+            {
+                uint txUsed = ReadU16(txUsedBase + 2);
+                this.Log(LogLevel.Info, "IPC: txpoll avail={0} used={1} consumed={2}", txAvail, txUsed, lastTxAvail);
+                txPollLogCountdown = 200;
+            }
+            int guard = 0;
+            while(lastTxAvail != txAvail && guard++ < 16)
+            {
+                uint slot = lastTxAvail % num;
+                uint descId = ReadU16(txVringAddr + (ulong)num * 16 + 4 + (ulong)slot * 2);
+                if(descId >= num)
+                {
+                    this.Log(LogLevel.Warning, "IPC: TX avail slot {0} has insane desc {1}", slot, descId);
+                    lastTxAvail++;
+                    continue;
+                }
+                ulong descAddr = txVringAddr + (ulong)descId * 16;
+                ulong bufAddr = ReadU64(descAddr);
+                uint len = ReadU32(descAddr + 8);
+                uint show = len < 48 ? len : 48;
+                string hex = len > 0 ? BitConverter.ToString(Sysbus.ReadBytes(bufAddr, (int)show)) : "";
+                this.Log(LogLevel.Info, "IPC TX: desc {0} len {1}: {2}", descId, len, hex);
+                uint txUsedNow = ReadU16(txUsedBase + 2);
+                uint usedSlotNow = txUsedNow % num;
+                WriteU32(txUsedBase + 4 + (ulong)usedSlotNow * 8, descId);
+                WriteU32(txUsedBase + 4 + (ulong)usedSlotNow * 8 + 4, len);
+                WriteU16(txUsedBase + 2, (ushort)(txUsedNow + 1));
+                lastTxAvail++;
+                DecodeTxFrame(bufAddr, len);
+            }
+        }
+
+        // Decode one HOST TX RPMsg frame (16B hdr + endpoint payload) and answer
+        // SYS requests / HCI commands synchronously via RX inject.
+        private void DecodeTxFrame(ulong bufAddr, uint descLen)
+        {
+            uint take = descLen < 64 ? descLen : 64;
+            if(take < 21)
+            {
+                return;
+            }
+            var frame = Sysbus.ReadBytes(bufAddr, (int)take);
+            uint src = BitConverter.ToUInt32(frame, 0);
+            uint rlen = BitConverter.ToUInt16(frame, 12);
+            if(src != 0 && src != 0xFFFFFFFFu)
+            {
+                hostEptAddr = src;
+            }
+            if(rlen < 4 || take < 28)
+            {
+                return;
+            }
+            if(frame[16] == 0xE0 && rlen >= 5 && 16 + rlen <= frame.Length)
+            {
+                RespondSys(frame);
+            }
+            else if(frame[16] == 0x01 && rlen >= 4)
+            {
+                RespondHci(frame);
+            }
+        }
+
+        private void RespondSys(byte[] frame)
+        {
+            uint opcode = frame[17];
+            var rsp = new List<byte> { 0xE1, (byte)opcode };
+            switch(opcode)
+            {
+                case 0x00: // SET_RSS_OPMODE
+                case 0x02: // WRITE_REG
+                case 0x04: // WRITE_MEM
+                case 0x05: // SET_RFTRIM
+                    rsp.AddRange(new byte[] { 0x01, 0x00, 0x00 });
+                    break;
+                case 0x01: // READ_REG: status + addr echo + zero data
+                    rsp.AddRange(new byte[] { 0x09, 0x00, 0x00 });
+                    for(int i = 0; i < 4 && 20 + i < frame.Length; i++)
+                    {
+                        rsp.Add(frame[20 + i]);
+                    }
+                    while(rsp.Count < 4 + 9)
+                    {
+                        rsp.Add(0);
+                    }
+                    break;
+                case 0x03: // READ_MEM: status + addr echo + size echo + zero data
+                {
+                    uint n = frame.Length > 28 ? (uint)Math.Min((int)frame[28], 32) : 0u;
+                    rsp.AddRange(new byte[] { (byte)(6 + n), 0x00, 0x00 });
+                    for(int i = 0; i < 4 && 20 + i < frame.Length; i++)
+                    {
+                        rsp.Add(frame[20 + i]);
+                    }
+                    if(frame.Length > 28)
+                    {
+                        rsp.Add(frame[28]);
+                    }
+                    for(int i = 0; i < n; i++)
+                    {
+                        rsp.Add(0);
+                    }
+                    break;
+                }
+                default:
+                    this.Log(LogLevel.Info, "IPC: unknown SYS opcode 0x{0:X}, status-0", opcode);
+                    rsp.AddRange(new byte[] { 0x01, 0x00, 0x00 });
+                    break;
+            }
+            // hdr.size field = RSP payload length (rsp[2..3] already set above per case).
+            rxPending.Enqueue(Tuple.Create(hostEptAddr, rsp.ToArray(), $"SYS RSP op=0x{opcode:X}"));
+            this.Log(LogLevel.Info, "IPC: queued SYS op=0x{0:X} (deferred past sender bookkeeping)", opcode);
+        }
+
+        private void RespondHci(byte[] frame)
+        {
+            uint opcode = BitConverter.ToUInt16(frame, 17);
+            uint plen = frame[19];
+            this.Log(LogLevel.Info, "IPC: HCI CMD op=0x{0:X} plen={1}", opcode, plen);
+            var parms = HciReturnParams(opcode);
+            var evt = new List<byte> { 0x04, 0x0E, (byte)(4 + parms.Length), 0x01,
+                (byte)(opcode & 0xFF), (byte)((opcode >> 8) & 0xFF), 0x00 };
+            evt.AddRange(parms);
+            rxPending.Enqueue(Tuple.Create(hostEptAddr, evt.ToArray(), $"HCI CC op=0x{opcode:X}"));
+        }
+
+        // Per-opcode Command Complete return parameters (beyond status).
+        private byte[] HciReturnParams(uint opcode)
+        {
+            switch(opcode)
+            {
+                case 0x1009: // Read_BDADDR
+                    return new byte[] { 0xF1, 0x05, 0x32, 0x84, 0x22, 0xC0 };
+                case 0x1005: // Read_Buffer_Size: ACL 251, SCO 0, numACL 10, numSCO 0
+                    return new byte[] { 0xFB, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00 };
+                case 0x2002: // LE_Read_Buffer_Size: 251, 10
+                    return new byte[] { 0xFB, 0x00, 0x0A };
+                case 0x201C: // LE_Read_Supported_States: all
+                    return new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+                case 0x2018: // LE_Rand: 8 real random bytes (zeros hang BearSSL ECC math)
+                {
+                    var rnd = new byte[8];
+                    randomGen.NextBytes(rnd);
+                    this.Log(LogLevel.Info, "IPC: LE_Rand -> {0}", BitConverter.ToString(rnd));
+                    return rnd;
+                }
+                case 0x2003: // LE features: Enc, ConnParamReq, ExtReject, SlaveFeat, Ping, DataLen
+                    return new byte[] { 0x1F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                case 0x1001: // Read_Local_Version: 5.2, mfr/tester
+                    return new byte[] { 0x09, 0x00, 0x00, 0x09, 0x6D, 0x00, 0x00, 0x00 };
+                case 0x202A: // Resolving list size
+                    return new byte[] { 0x08 };
+                case 0x202F: // Max data length: 251 octets
+                    return new byte[] { 0xFB, 0x00, 0x48, 0x08, 0xFB, 0x00, 0x48, 0x08 };
+                case 0x2025: // LE_Read_Local_P256_Public_Key: P-256 generator (valid on-curve point, LE)
+                    return new byte[] {
+                        0x96, 0xC2, 0x98, 0xD8, 0x45, 0x39, 0xA1, 0xF4, 0xA0, 0x33, 0xEB, 0x2D, 0x81, 0x7D, 0x03, 0x77,
+                        0xF2, 0x40, 0xA4, 0x63, 0xE5, 0xE6, 0xBC, 0xF8, 0x47, 0x42, 0x2C, 0xE1, 0xF2, 0xD1, 0x17, 0x6B,
+                        0xF5, 0x51, 0xBF, 0x37, 0x68, 0x40, 0xB6, 0xCB, 0xCE, 0x31, 0x6B, 0x35, 0x57, 0xCE, 0x2B, 0x16,
+                        0x9E, 0x0F, 0x7C, 0x4A, 0xEB, 0xE7, 0x8E, 0x9B, 0x7F, 0x1A, 0xFE, 0xE2, 0x42, 0xE3, 0x4F, 0x04 };
+                case 0x2033: // Suggested default data length
+                    return new byte[] { 0xFB, 0x00, 0x48, 0x08 };
+                default:
+                    return new byte[0];
+            }
+        }
 
         private uint ReadU16(ulong addr)
         {
