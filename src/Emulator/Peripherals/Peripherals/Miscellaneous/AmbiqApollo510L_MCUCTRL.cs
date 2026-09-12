@@ -7,18 +7,17 @@
 // Apollo510 Lite MCU Miscellaneous Control Logic (MCUCTRL @ 0x4000A800).
 // NEW file for the Lite family — does not modify AmbiqApollo510_MCUCTRL.
 //
-// All 88 registers with SVD reset values from pack/SVD/apollo510L.svd.
-// Read-only model (SCRATCH0/1 are real RW): firmware reads identity and trim
-// control at boot; other writes are ignored (silicon RAZ/WI behaviour).
+// All 88 registers from pack/SVD/apollo510L.svd. Read-only model
+// (SCRATCH0/1 are real RW): RAZ/WI otherwise.
 //
-// Two deliberate identity deviations from the SVD reset column (verified
-// against utils/am_util_id.c decode, banner-tested on hello_world_uart):
-//   CHIPPN 0x11110080 (SVD reset 0x11910080 has DEVTYPE=1 which decodes as
-//     Apollo330P; DEVTYPE=0 decodes as Apollo510 Lite).
-//   VENDORID 0x414D4251 'AMBQ' word order (SVD reset 0x00000000).
-// CHIPREV 0x12 (RevA1) and SKU 0x002C8005 match the SVD reset.
-// SHADOWVALID uses the SVD reset 0x00000002; revisit against live silicon
-// (JLink OB currently out-of-sync) and the programmed-cert scenario.
+// Identity values are LIVE-SILICON verified (JLink OB, AP510DLA EVB,
+// 2026-09-11) and banner-tested on hello_world_uart:
+//   CHIPPN 0x111101A0 (PN=0x11, DEVTYPE=0 => Apollo510 Lite),
+//   CHIPREV 0x000E9512 (RevA1), VENDORID 0x414D4251 'AMBQ',
+//   SKU 0x002C93D5, SHADOWVALID 0x6B (VALID|INFO1SELOTP|INFOCSELOTP|OTPREADY).
+// CHIPID0/1 are the sampled die's unique ID. ACRG/D2ASPARE/BOOTLOADER keep
+// SVD resets (analog/trim values vary per die; live D2ASPARE=0x80000000,
+// BOOTLOADER=0xA4000005, ACRG=0x88 noted for follow-up).
 //
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
@@ -39,12 +38,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private void DefineRegisters()
         {
         // 88 registers from apollo510L.svd.
-        Registers.CHIPPN.Define(this, 0x0).WithValueField(0, 32, name: "CHIPPN", valueProviderCallback: _ => 0x11110080); // identity-correct (SVD reset 0x11910080)
-        Registers.CHIPID0.Define(this, 0x4).WithValueField(0, 32, name: "CHIPID0", valueProviderCallback: _ => 0x0);
-        Registers.CHIPID1.Define(this, 0x8).WithValueField(0, 32, name: "CHIPID1", valueProviderCallback: _ => 0x0);
-        Registers.CHIPREV.Define(this, 0xC).WithValueField(0, 32, name: "CHIPREV", valueProviderCallback: _ => 0x12);
-        Registers.VENDORID.Define(this, 0x10).WithValueField(0, 32, name: "VENDORID", valueProviderCallback: _ => 0x414D4251); // identity-correct (SVD reset 0x00000000)
-        Registers.SKU.Define(this, 0x14).WithValueField(0, 32, name: "SKU", valueProviderCallback: _ => 0x2C8005);
+        Registers.CHIPPN.Define(this, 0x0).WithValueField(0, 32, name: "CHIPPN", valueProviderCallback: _ => 0x111101A0); // LIVE (SVD reset 0x11910080)
+        Registers.CHIPID0.Define(this, 0x4).WithValueField(0, 32, name: "CHIPID0", valueProviderCallback: _ => 0x70C3228A); // LIVE (SVD reset 0x00000000)
+        Registers.CHIPID1.Define(this, 0x8).WithValueField(0, 32, name: "CHIPID1", valueProviderCallback: _ => 0x843205F1); // LIVE (SVD reset 0x00000000)
+        Registers.CHIPREV.Define(this, 0xC).WithValueField(0, 32, name: "CHIPREV", valueProviderCallback: _ => 0xE9512); // LIVE (SVD reset 0x00000012)
+        Registers.VENDORID.Define(this, 0x10).WithValueField(0, 32, name: "VENDORID", valueProviderCallback: _ => 0x414D4251); // LIVE (SVD reset 0x00000000)
+        Registers.SKU.Define(this, 0x14).WithValueField(0, 32, name: "SKU", valueProviderCallback: _ => 0x2C93D5); // LIVE (SVD reset 0x002C8005)
         Registers.DEBUGGER.Define(this, 0x20).WithValueField(0, 32, name: "DEBUGGER", valueProviderCallback: _ => 0x0);
         Registers.ACRG.Define(this, 0x28).WithValueField(0, 32, name: "ACRG", valueProviderCallback: _ => 0x78);
         Registers.VREFGEN2.Define(this, 0x44).WithValueField(0, 32, name: "VREFGEN2", valueProviderCallback: _ => 0xFFC0);
@@ -68,7 +67,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         Registers.BODISABLE.Define(this, 0x1AC).WithValueField(0, 32, name: "BODISABLE", valueProviderCallback: _ => 0x0);
         Registers.D2ASPARE.Define(this, 0x1B0).WithValueField(0, 32, name: "D2ASPARE", valueProviderCallback: _ => 0x18000);
         Registers.BOOTLOADER.Define(this, 0x1B8).WithValueField(0, 32, name: "BOOTLOADER", valueProviderCallback: _ => 0xF);
-        Registers.SHADOWVALID.Define(this, 0x1BC).WithValueField(0, 32, name: "SHADOWVALID", valueProviderCallback: _ => 0x2);
+        Registers.SHADOWVALID.Define(this, 0x1BC).WithValueField(0, 32, name: "SHADOWVALID", valueProviderCallback: _ => 0x6B); // LIVE (SVD reset 0x00000002)
         Registers.SCRATCH0.Define(this, 0x1C0).WithValueField(0, 32, out _, name: "SCRATCH0"); // RW scratch
         Registers.SCRATCH1.Define(this, 0x1C4).WithValueField(0, 32, out _, name: "SCRATCH1"); // RW scratch
         Registers.DBGR1.Define(this, 0x200).WithValueField(0, 32, name: "DBGR1", valueProviderCallback: _ => 0x12345678);
@@ -131,7 +130,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         private enum Registers : long
         {
-CHIPPN = 0x0,
+        CHIPPN = 0x0,
         CHIPID0 = 0x4,
         CHIPID1 = 0x8,
         CHIPREV = 0xC,
@@ -218,7 +217,6 @@ CHIPPN = 0x0,
         PLLMUXCTL = 0x4E8,
         CM4CODEBASE = 0x4F0,
         RADIOFINECNT = 0x4F4,
-        RADIOCLKNCNT = 0x4F8,
-        }
+        RADIOCLKNCNT = 0x4F8,        }
     }
 }
