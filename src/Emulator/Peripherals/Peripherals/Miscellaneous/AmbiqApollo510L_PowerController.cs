@@ -33,6 +33,7 @@ using System.Linq;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
+using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous
@@ -46,6 +47,17 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         }
 
         public long Size => 0x250;
+
+        // CM4 radio-subsystem boot output: asserted while CM4POWERONREQ is set.
+        // Wired in the repl to the CM55IPC CM4-alive input so the emulated CM4
+        // raises the IPCINIT handshake (am_hal_pwrctrl_rss_bootup waits on it).
+        public GPIO CM4Boot { get; } = new GPIO();
+
+        public override void Reset()
+        {
+            base.Reset();
+            CM4Boot.Unset();
+        }
 
         private void DefineRegisters()
         {
@@ -253,16 +265,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithReservedBits(1, 31)
                 ;
 
-            // CM4 radio subsystem power. CM4PWRSTATE[1:0] is read by the Lite
-            // radio bring-up (am_devices_510L_radio / CM4 wake handshake).
-            // Reported as a plain RW value at reset 0 until IPC modeling lands.
+            // CM4 radio subsystem power. Setting CM4POWERONREQ reports CM4PWRSTATUS
+            // ON and asserts CM4Boot (the emulated CM4 is alive); clearing the
+            // request reports OFF and deasserts CM4Boot. This satisfies the
+            // am_hal_pwrctrl_cm4_wakeup_req poll (CM4PWRSTATUS != OFF) and drives
+            // the IPCINIT handshake into CM55IPC.
             Registers.CM4PowerControl.Define(this)
-                .WithFlag(0, out cm4PowerOnRequest, name: "CM4POWERONREQ")
+                .WithFlag(0, out cm4PowerOnRequest, name: "CM4POWERONREQ",
+                    writeCallback: (_, v) => { cm4PowerStatus.Value = v ? 1u : 0u; if(v) { CM4Boot.Set(); } else { CM4Boot.Unset(); } this.Log(LogLevel.Info, "PWRCTRL: CM4 {0} (PWRSTATUS={1})", v ? "wakeup request" : "power off", cm4PowerStatus.Value); })
                 .WithReservedBits(1, 31)
                 ;
 
             Registers.CM4PowerState.Define(this)
-                .WithValueField(0, 2, name: "CM4PWRSTATUS")
+                .WithValueField(0, 2, out cm4PowerStatus, name: "CM4PWRSTATUS")
                 .WithReservedBits(2, 30)
                 ;
 
@@ -438,6 +453,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private IFlagRegisterField powerEnableFlagNVM;
         private IFlagRegisterField powerEnableFlagROM;
         private IFlagRegisterField cm4PowerOnRequest;
+        private IValueRegisterField cm4PowerStatus;
         private IFlagRegisterField mcuPowerEnable;
         private IValueRegisterField powerEnableFlagTCM;
         private IValueRegisterField powerEnableFlagSSRAM;
