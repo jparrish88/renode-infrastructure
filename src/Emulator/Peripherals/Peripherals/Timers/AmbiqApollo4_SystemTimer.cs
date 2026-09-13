@@ -153,6 +153,18 @@ namespace Antmicro.Renode.Peripherals.Timers
                 .WithReservedBits(13, 19)
                 ;
 
+            // STIMER save/restore block (SNVR0/SNVR1 on Lite, NVRAM0-2 + the
+            // word past HALSTATES on Apollo4 headers): all __IOM storage the
+            // HAL persists deep-sleep state through. RW, reset 0.
+            Registers.SystemTimerNVRAM0.Define(this)
+                .WithValueField(0, 32, name: "SNVR0");
+            Registers.SystemTimerNVRAM1.Define(this)
+                .WithValueField(0, 32, name: "SNVR1");
+            Registers.SystemTimerNVRAM2.Define(this)
+                .WithValueField(0, 32, name: "HALSTATES");
+            Registers.SystemTimerNVRAM2Hi.Define(this)
+                .WithValueField(0, 32, name: "HALSTATES_HI");
+
             Registers.InterruptEnable.Define(this)
                 .WithFlags(0, 8, name: "COMPAREx",
                     changeCallback: (registerIndex, _, newValue) => compareRegisters[registerIndex].InterruptEnable = newValue,
@@ -500,6 +512,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             SystemTimerNVRAM0 = 0x50,
             SystemTimerNVRAM1 = 0x54,
             SystemTimerNVRAM2 = 0x58,
+            SystemTimerNVRAM2Hi = 0x5C,
             InterruptEnable = 0x100,
             InterruptStatus = 0x104,
             InterruptClear = 0x108,
