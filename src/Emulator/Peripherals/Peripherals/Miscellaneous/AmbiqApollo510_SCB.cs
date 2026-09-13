@@ -57,8 +57,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         public void Reset() { }
 
-        // Covers CPUID(0x0)..ACTLR(0x8C); stops before DCB@0xE000EDF0. NVIC owns the lower 0xE000E0xx region.
-        public long Size => 0xF0;
+        // Full ARMv8-M SCB/DCB block: CPUID(0x0)..CPUACR(0xFC, written by CMSIS
+        // FPU init via SCB->CPUACR at 0xE000EDFC). Reads/writes beyond the
+        // modelled registers latch for read-back fidelity; NVIC owns 0xE000E0xx.
+        public long Size => 0x100;
 
         private CortexM GetCPU()
         {
