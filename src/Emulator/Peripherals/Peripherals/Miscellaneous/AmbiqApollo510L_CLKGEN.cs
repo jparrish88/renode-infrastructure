@@ -75,7 +75,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             Registers.Misc.Define(this)
                 .WithFlag(0, out _, name: "FRCHFRC")
                 .WithFlag(1, out _, name: "FRCBURSTOFF")
-                .WithReservedBits(2, 7)
+                .WithIgnoredBits(2, 7)
                 .WithFlag(9, out _, name: "PWRONCLKENDISP")
                 .WithFlag(10, out _, name: "PWRONCLKENGFX")
                 .WithFlag(11, out _, name: "PWRONCLKENUSB")
@@ -93,7 +93,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithFlag(23, out _, name: "HFRCFUNCCLKGATEEN")
                 .WithFlag(24, out _, name: "HFRC96TRUNKGATE")
                 .WithFlag(25, out _, name: "CLKGENMISCSPARE")
-                .WithReservedBits(26, 6)
+                .WithIgnoredBits(26, 6)
                 ;
 
             Registers.LFRCControl.Define(this)

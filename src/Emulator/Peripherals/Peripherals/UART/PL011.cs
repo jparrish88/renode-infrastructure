@@ -245,11 +245,11 @@ namespace Antmicro.Renode.Peripherals.UART
                     ;
 
                 Registers.DMAControl.Define(this)
-                    .WithTaggedFlag("RXDMAE - Receive DMA enable", 0)
+                    .WithFlag(0, name: "RXDMAE - Receive DMA enable")
                     .WithFlag(1, name: "TXDMAE - Transmit DMA enable (write 1 to start TX DMA)",
                         writeCallback: (_, value) => { if (value) PerformTxDma(); })
-                    .WithTaggedFlag("DMAONERR - DMA on error", 2)
-                    .WithReservedBits(3, 13)
+                    .WithFlag(2, name: "DMAONERR - DMA on error")
+                    .WithIgnoredBits(3, 13)
                     ;
 
                 Registers.DmaTargetAddress.Define(this)
@@ -306,10 +306,10 @@ namespace Antmicro.Renode.Peripherals.UART
                     ;
 
                 Registers.DMAControl.Define(this)
-                    .WithTaggedFlag("RXDMAE - Receive DMA enable", 0)
-                    .WithTaggedFlag("TXDMAE - Transmit DMA enable", 1)
-                    .WithTaggedFlag("DMAONERR - DMA on error", 2)
-                    .WithReservedBits(3, 13)
+                    .WithFlag(0, name: "RXDMAE - Receive DMA enable")
+                    .WithFlag(1, name: "TXDMAE - Transmit DMA enable")
+                    .WithFlag(2, name: "DMAONERR - DMA on error")
+                    .WithIgnoredBits(3, 13)
                     ;
 
                 Registers.InterruptFIFOLevel.Define(this, 0b010010)

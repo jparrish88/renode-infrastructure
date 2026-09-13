@@ -141,7 +141,7 @@ namespace Antmicro.Renode.Peripherals.Analog
                 {
                     register
                         .WithFlag(0, out slots[index].EnableFlag, name: $"SLEN{index}")
-                        .WithTaggedFlag($"WCEN{index}", 1)
+                        .WithFlag(1, name: $"WCEN{index}")
                         .WithReservedBits(2, 6)
                         .WithEnumField(8, 4, out slots[index].ChannelSelect, name: $"CHSEL{index}", writeCallback: (oldValue, newValue) =>
                         {
@@ -153,9 +153,9 @@ namespace Antmicro.Renode.Peripherals.Analog
                             }
                         })
                         .WithReservedBits(12, 4)
-                        .WithTag($"PRMODE{index}", 16, 2)
-                        .WithTag($"TRKCYC{index}", 18, 6)
-                        .WithTag($"ADSEL{index}", 24, 3)
+                        .WithValueField(16, 2, name: $"PRMODE{index}")
+                        .WithValueField(18, 6, name: $"TRKCYC{index}")
+                        .WithValueField(24, 3, name: $"ADSEL{index}")
                         .WithReservedBits(27, 5)
                         ;
                 });
@@ -196,11 +196,11 @@ namespace Antmicro.Renode.Peripherals.Analog
                 ;
 
             Registers.InternalTimerConfiguration.Define(this)
-                .WithTag("TIMERMAX", 0, 10)
+                .WithValueField(0, 10, name: "TIMERMAX")
                 .WithReservedBits(10, 6)
-                .WithTag("CLKDIV", 16, 3)
+                .WithValueField(16, 3, name: "CLKDIV")
                 .WithReservedBits(19, 12)
-                .WithTaggedFlag("TIMEREN", 31)
+                .WithFlag(31, name: "TIMEREN")
                 ;
 
             Registers.ZeroCrossingComparatorConfiguration.Define(this)
