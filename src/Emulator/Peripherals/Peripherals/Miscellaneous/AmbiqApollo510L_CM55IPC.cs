@@ -758,11 +758,31 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             uint opcode = BitConverter.ToUInt16(frame, 17);
             uint plen = frame[19];
             this.Log(LogLevel.Info, "IPC: HCI CMD op=0x{0:X} plen={1}", opcode, plen);
+            // P256/DHKey use LE Meta events, not Command Complete, or Cordio never fires SecEccHciCback.
+            if(opcode == 0x2025) // LE Read Local P256 Public Key
+            {
+                var key = HciReturnParams(opcode); // 64B X||Y LE (P-256 generator)
+                var evt = new List<byte> { 0x04, 0x3E, 0x42, 0x08, 0x00 };
+                evt.AddRange(key);
+                rxPending.Enqueue(Tuple.Create(hostEptAddr, evt.ToArray(), $"HCI LE P256 op=0x{opcode:X}"));
+                this.Log(LogLevel.Info, "IPC: queued LE P256 event for 0x2025");
+                return;
+            }
+            if(opcode == 0x2026) // LE Generate DHKey
+            {
+                var dh = new byte[32];
+                randomGen.NextBytes(dh);
+                var evt = new List<byte> { 0x04, 0x3E, 0x22, 0x09, 0x00 };
+                evt.AddRange(dh);
+                rxPending.Enqueue(Tuple.Create(hostEptAddr, evt.ToArray(), $"HCI LE DHKey op=0x{opcode:X}"));
+                this.Log(LogLevel.Info, "IPC: queued LE DHKey event for 0x2026");
+                return;
+            }
             var parms = HciReturnParams(opcode);
-            var evt = new List<byte> { 0x04, 0x0E, (byte)(4 + parms.Length), 0x01,
+            var evt2 = new List<byte> { 0x04, 0x0E, (byte)(4 + parms.Length), 0x01,
                 (byte)(opcode & 0xFF), (byte)((opcode >> 8) & 0xFF), 0x00 };
-            evt.AddRange(parms);
-            rxPending.Enqueue(Tuple.Create(hostEptAddr, evt.ToArray(), $"HCI CC op=0x{opcode:X}"));
+            evt2.AddRange(parms);
+            rxPending.Enqueue(Tuple.Create(hostEptAddr, evt2.ToArray(), $"HCI CC op=0x{opcode:X}"));
         }
 
         // Per-opcode Command Complete return parameters (beyond status).
