@@ -39,29 +39,29 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private void DefineRegisters()
         {
             Registers.OutputControl.Define(this)
-                .WithReservedBits(0, 6)
+                .WithIgnoredBits(0, 6)
                 .WithFlag(6, out _, name: "RTCOSEL")
                 .WithFlag(7, out _, name: "SECURERTCOSEL")
-                .WithReservedBits(8, 24)
+                .WithIgnoredBits(8, 24)
                 ;
 
             Registers.ClockOutput.Define(this)
                 .WithValueField(0, 6, out _, name: "CKSEL")
-                .WithReservedBits(6, 1)
+                .WithIgnoredBits(6, 1)
                 .WithFlag(7, out _, name: "CKEN")
                 .WithFlag(8, out _, name: "AOCLKFORCEEN")
-                .WithReservedBits(9, 23)
+                .WithIgnoredBits(9, 23)
                 ;
 
             Registers.HFAdjust.Define(this, 0x0025B800)
                 .WithFlag(0, out _, name: "HFADJEN")
                 .WithValueField(1, 3, out _, name: "HFADJCK")
-                .WithReservedBits(4, 4)
+                .WithIgnoredBits(4, 4)
                 .WithValueField(8, 12, out _, name: "HFXTADJ")
                 .WithFlag(20, out _, name: "HFWARMUP")
                 .WithValueField(21, 3, out _, name: "HFADJGAIN")
                 .WithValueField(24, 5, out _, name: "HFADJMAXDELTA")
-                .WithReservedBits(29, 3)
+                .WithIgnoredBits(29, 3)
                 ;
 
             // Ideal-timing abstraction: every clock reports ready.
@@ -99,7 +99,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             Registers.LFRCControl.Define(this)
                 .WithFlag(0, out _, name: "LFRCOUT")
                 .WithFlag(1, out _, name: "LFRCPWD")
-                .WithReservedBits(2, 30)
+                .WithIgnoredBits(2, 30)
                 ;
 
             Registers.Spares.Define(this)
@@ -109,7 +109,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithValueField(0, 6, out _, name: "HFRCPWRDOWNDELAY")
                 .WithValueField(6, 6, out _, name: "HFRCCLKREQDELAY")
                 .WithFlag(12, out _, name: "UPDATEENABLE")
-                .WithReservedBits(13, 19)
+                .WithIgnoredBits(13, 19)
                 ;
 
             Registers.MSPIIOClockControl.Define(this, 0x00004214)
@@ -119,7 +119,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithValueField(6, 4, out _, name: "MSPI1IOCLKSEL")
                 .WithFlag(10, out _, name: "MSPI2IOCLKEN")
                 .WithValueField(11, 4, out _, name: "MSPI2IOCLKSEL")
-                .WithReservedBits(15, 17)
+                .WithIgnoredBits(15, 17)
                 ;
 
             // Full map from CMSIS apollo510L.h (the SVD only names I3CCLKEN).
@@ -137,7 +137,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 .WithFlag(9, out _, name: "PLLDIVEN")
                 .WithFlag(10, out _, name: "PLLVCOEN")
                 .WithFlag(11, out _, name: "I3CCLKEN")
-                .WithReservedBits(12, 20)
+                .WithIgnoredBits(12, 20)
                 ;
         }
 

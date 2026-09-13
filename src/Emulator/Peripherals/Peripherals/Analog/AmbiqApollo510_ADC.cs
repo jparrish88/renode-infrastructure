@@ -105,24 +105,24 @@ namespace Antmicro.Renode.Peripherals.Analog
         {
             Registers.Configuration.Define(this)
                 .WithFlag(0, out moduleEnabled, name: "ADCEN", writeCallback: (oldValue, newValue) => { if(oldValue && !newValue) fifo.Clear(); })
-                .WithReservedBits(1, 1)
-                .WithTaggedFlag("RPTEN", 2)
-                .WithTaggedFlag("LPMODE", 3)
-                .WithTaggedFlag("CKMODE", 4)
-                .WithReservedBits(5, 7)
+                .WithIgnoredBits(1, 1)
+                .WithFlag(2, name: "RPTEN")
+                .WithFlag(3, name: "LPMODE")
+                .WithFlag(4, name: "CKMODE")
+                .WithIgnoredBits(5, 7)
                 .WithFlag(12, out fifoPushEnabled, name: "DFIFORDEN")
-                .WithReservedBits(13, 3)
-                .WithTag("TRIGSEL", 16, 3)
-                .WithTaggedFlag("TRIGPOL", 19)
-                .WithTaggedFlag("RPTTRIGSEL", 20)
-                .WithReservedBits(21, 3)
-                .WithTag("CLKSEL", 24, 2)
-                .WithReservedBits(26, 6)
+                .WithIgnoredBits(13, 3)
+                .WithValueField(16, 3, name: "TRIGSEL")
+                .WithFlag(19, name: "TRIGPOL")
+                .WithFlag(20, name: "RPTTRIGSEL")
+                .WithIgnoredBits(21, 3)
+                .WithValueField(24, 2, name: "CLKSEL")
+                .WithIgnoredBits(26, 6)
                 ;
 
             Registers.PowerStatus.Define(this)
-                .WithTaggedFlag("PWDSTAT", 0)
-                .WithReservedBits(1, 31)
+                .WithFlag(0, name: "PWDSTAT")
+                .WithIgnoredBits(1, 31)
                 ;
 
             Registers.SoftwareTrigger.Define(this)
@@ -134,7 +134,7 @@ namespace Antmicro.Renode.Peripherals.Analog
                         ScanAllSlots();
                     }
                 })
-                .WithReservedBits(8, 24)
+                .WithIgnoredBits(8, 24)
                 ;
 
             Registers.Slot0Configuration.Define32Many(this, SlotsCount, (register, index) =>
@@ -161,25 +161,25 @@ namespace Antmicro.Renode.Peripherals.Analog
                 });
 
             Registers.WindowComparatorUpperLimits.Define(this)
-                .WithTag("ULIM", 0, 20)
-                .WithReservedBits(20, 12)
+                .WithValueField(0, 20, name: "ULIM")
+                .WithIgnoredBits(20, 12)
                 ;
 
             Registers.WindowComparatorLowerLimits.Define(this)
-                .WithTag("LLIM", 0, 20)
-                .WithReservedBits(20, 12)
+                .WithValueField(0, 20, name: "LLIM")
+                .WithIgnoredBits(20, 12)
                 ;
 
             Registers.ScaleWindowComparatorLimits.Define(this)
-                .WithTaggedFlag("SCWLIMEN", 0)
-                .WithReservedBits(1, 31)
+                .WithFlag(0, name: "SCWLIMEN")
+                .WithIgnoredBits(1, 31)
                 ;
 
             Registers.Fifo.Define(this)
                 .WithValueField(0, 20, name: "DATA", valueProviderCallback: _ => fifo.Count > 0 ? fifo.Peek().Data : 0x0)
                 .WithValueField(20, 8, name: "COUNT", valueProviderCallback: _ => (uint)fifo.Count)
                 .WithValueField(28, 3, name: "SLOTNUM", valueProviderCallback: _ => fifo.Count > 0 ? fifo.Peek().SlotNumber : 0x0)
-                .WithTaggedFlag("RSVD", 31)
+                .WithFlag(31, name: "RSVD")
                 // Writing FIFO register with any value causes the Pop to occur.
                 .WithWriteCallback((__, ___) => { if(fifo.Count > 0) _ = fifo.Dequeue(); })
                 ;
@@ -190,7 +190,7 @@ namespace Antmicro.Renode.Peripherals.Analog
                 .WithValueField(20, 8, FieldMode.Read, name: "COUNT", valueProviderCallback: _ => (uint)fifo.Count)
                 .WithValueField(28, 3, FieldMode.Read, name: "SLOTNUMPR",
                         valueProviderCallback: _ => (fifoPushEnabled.Value && fifo.Count > 0) ? fifo.Peek().SlotNumber : 0x0)
-                .WithTaggedFlag("RSVDPR", 31)
+                .WithFlag(31, name: "RSVDPR")
                 // Reading FIFOPR register causes the Pop to occur if it's enabled in the Configuration register.
                 .WithReadCallback((__, ___) => { if(fifoPushEnabled.Value && fifo.Count > 0) _ = fifo.Dequeue(); })
                 ;
@@ -204,117 +204,117 @@ namespace Antmicro.Renode.Peripherals.Analog
                 ;
 
             Registers.ZeroCrossingComparatorConfiguration.Define(this)
-                .WithTaggedFlag("ZXEN", 0)
-                .WithReservedBits(1, 3)
-                .WithTaggedFlag("ZXCHANSEL", 4)
-                .WithReservedBits(5, 27)
+                .WithFlag(0, name: "ZXEN")
+                .WithIgnoredBits(1, 3)
+                .WithFlag(4, name: "ZXCHANSEL")
+                .WithIgnoredBits(5, 27)
                 ;
 
             Registers.ZeroCrossingComparatorLimits.Define(this)
-                .WithTag("LZXC", 0, 12)
-                .WithReservedBits(12, 4)
-                .WithTag("UZXC", 16, 12)
-                .WithReservedBits(28, 4)
+                .WithValueField(0, 12, name: "LZXC")
+                .WithIgnoredBits(12, 4)
+                .WithValueField(16, 12, name: "UZXC")
+                .WithIgnoredBits(28, 4)
                 ;
 
             Registers.PGAGainConfiguration.Define(this)
-                .WithTaggedFlag("PGACTRLEN", 0)
-                .WithReservedBits(1, 3)
-                .WithTaggedFlag("UPDATEMODE", 4)
-                .WithReservedBits(5, 27)
+                .WithFlag(0, name: "PGACTRLEN")
+                .WithIgnoredBits(1, 3)
+                .WithFlag(4, name: "UPDATEMODE")
+                .WithIgnoredBits(5, 27)
                 ;
 
             Registers.PGAGainCodes.Define(this)
-                .WithTag("LGA", 0, 7)
-                .WithReservedBits(7, 1)
-                .WithTag("HGADELTA", 8, 7)
-                .WithReservedBits(15, 1)
-                .WithTag("LGB", 16, 7)
-                .WithReservedBits(23, 1)
-                .WithTag("HGBDELTA", 24, 7)
-                .WithReservedBits(31, 1)
+                .WithValueField(0, 7, name: "LGA")
+                .WithIgnoredBits(7, 1)
+                .WithValueField(8, 7, name: "HGADELTA")
+                .WithIgnoredBits(15, 1)
+                .WithValueField(16, 7, name: "LGB")
+                .WithIgnoredBits(23, 1)
+                .WithValueField(24, 7, name: "HGBDELTA")
+                .WithIgnoredBits(31, 1)
                 ;
 
             Registers.SaturationComparatorConfiguration.Define(this)
-                .WithTaggedFlag("SATEN", 0)
-                .WithReservedBits(1, 3)
-                .WithTaggedFlag("SATCHANSEL", 4)
-                .WithReservedBits(5, 27)
+                .WithFlag(0, name: "SATEN")
+                .WithIgnoredBits(1, 3)
+                .WithFlag(4, name: "SATCHANSEL")
+                .WithIgnoredBits(5, 27)
                 ;
 
             Registers.SaturationComparatorLimits.Define(this)
-                .WithTag("LSATC", 0, 12)
-                .WithReservedBits(12, 4)
-                .WithTag("USATC", 16, 12)
-                .WithReservedBits(28, 4)
+                .WithValueField(0, 12, name: "LSATC")
+                .WithIgnoredBits(12, 4)
+                .WithValueField(16, 12, name: "USATC")
+                .WithIgnoredBits(28, 4)
                 ;
 
             Registers.SaturationComparatorEventCounterLimits.Define(this, 0x00010001)
-                .WithTag("SATCAMAX", 0, 12)
-                .WithReservedBits(12, 4)
-                .WithTag("SATCBMAX", 16, 12)
-                .WithReservedBits(28, 4)
+                .WithValueField(0, 12, name: "SATCAMAX")
+                .WithIgnoredBits(12, 4)
+                .WithValueField(16, 12, name: "SATCBMAX")
+                .WithIgnoredBits(28, 4)
                 ;
 
             Registers.SaturationComparatorEventCounterClear.Define(this)
-                .WithTaggedFlag("SATCACLR", 0)
-                .WithTaggedFlag("SATCBCLR", 1)
-                .WithReservedBits(2, 30)
+                .WithFlag(0, name: "SATCACLR")
+                .WithFlag(1, name: "SATCBCLR")
+                .WithIgnoredBits(2, 30)
                 ;
 
             Registers.InterruptEnable.Define(this)
                 .WithFlags(0, 12, out interruptEnableFlags, name: "INTENx")
-                .WithReservedBits(12, 20)
+                .WithIgnoredBits(12, 20)
                 .WithChangeCallback((_, __) => UpdateIRQ())
                 ;
 
             Registers.InterruptStatus.Define(this)
                 .WithFlags(0, 12, FieldMode.Read, name: "INTSTATx", valueProviderCallback: (interrupt, _) => interruptStatuses[interrupt])
-                .WithReservedBits(12, 20)
+                .WithIgnoredBits(12, 20)
                 ;
 
             Registers.InterruptClear.Define(this)
                 .WithFlags(0, 12, FieldMode.Write, name: "INTCLRx",
                         writeCallback: (interrupt, _, newValue) => { if(newValue) SetInterruptStatus((Interrupts)interrupt, false); })
-                .WithReservedBits(12, 20)
+                .WithIgnoredBits(12, 20)
                 ;
 
             Registers.InterruptSet.Define(this)
                 .WithFlags(0, 12, FieldMode.Write, name: "INTSETx",
                         writeCallback: (interrupt, _, newValue) => { if(newValue) SetInterruptStatus((Interrupts)interrupt, true); })
-                .WithReservedBits(12, 20)
+                .WithIgnoredBits(12, 20)
                 ;
 
             Registers.DMATriggerEnable.Define(this)
-                .WithTaggedFlag("DFIFO75", 0)
-                .WithTaggedFlag("DFIFOFULL", 1)
-                .WithReservedBits(2, 30)
+                .WithFlag(0, name: "DFIFO75")
+                .WithFlag(1, name: "DFIFOFULL")
+                .WithIgnoredBits(2, 30)
                 ;
 
             Registers.DMATriggerStatus.Define(this)
-                .WithTaggedFlag("D75STAT", 0)
-                .WithTaggedFlag("DFULLSTAT", 1)
-                .WithReservedBits(2, 30)
+                .WithFlag(0, name: "D75STAT")
+                .WithFlag(1, name: "DFULLSTAT")
+                .WithIgnoredBits(2, 30)
                 ;
 
             Registers.DMAConfiguration.Define(this)
                 .WithValueField(0, 1, out dmaEn, name: "DMAEN")
-                .WithReservedBits(1, 1)
-                .WithTaggedFlag("DMADIR", 2)
-                .WithReservedBits(3, 5)
-                .WithTaggedFlag("DMAPRI", 8)
-                .WithTaggedFlag("DMADYNPRI", 9)
-                .WithReservedBits(10, 7)
-                .WithTaggedFlag("DMAMSK", 17)
-                .WithTaggedFlag("DPWROFF", 18)
-                .WithReservedBits(19, 13)
+                .WithIgnoredBits(1, 1)
+                .WithFlag(2, name: "DMADIR")
+                .WithIgnoredBits(3, 5)
+                .WithFlag(8, name: "DMAPRI")
+                .WithFlag(9, name: "DMADYNPRI")
+                .WithIgnoredBits(10, 7)
+                .WithFlag(17, name: "DMAMSK")
+                .WithFlag(18, name: "DPWROFF")
+                .WithIgnoredBits(19, 13)
                 .WithChangeCallback((_, __) => { if (dmaEn.Value == 1) PerformDma(); })
                 ;
 
             Registers.DMATotalTransferCount.Define(this)
-                .WithReservedBits(0, 2)
+                .WithIgnoredBits(0, 2)
                 .WithValueField(2, 16, out dmaTotCount, name: "TOTCOUNT")
-                .WithReservedBits(18, 14)
+                .WithIgnoredBits(18, 14)
                 ;
 
             Registers.DMATargetAddress.Define(this, 0x10000000)
@@ -326,7 +326,7 @@ namespace Antmicro.Renode.Peripherals.Analog
                 .WithValueField(0, 1, FieldMode.Read, name: "DMATIP", valueProviderCallback: _ => (uint)(dmaTip ? 1 : 0))
                 .WithValueField(1, 1, out dmaCplFlag, name: "DMACPL")
                 .WithValueField(2, 1, FieldMode.Read, name: "DMAERR", valueProviderCallback: _ => (uint)(dmaErr ? 1 : 0))
-                .WithReservedBits(3, 29)
+                .WithIgnoredBits(3, 29)
                 ;
         }
 
