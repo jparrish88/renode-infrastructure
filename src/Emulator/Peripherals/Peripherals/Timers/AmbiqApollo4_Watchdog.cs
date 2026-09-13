@@ -4,6 +4,7 @@
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
 //
+using System;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Logging;
@@ -13,6 +14,8 @@ namespace Antmicro.Renode.Peripherals.Timers
 {
     public class AmbiqApollo4_Watchdog : BasicDoubleWordPeripheral, IKnownSize
     {
+        public GPIO IRQ { get; } = new GPIO();
+
         public AmbiqApollo4_Watchdog(IMachine machine) : base(machine)
         {
             resetTimer = new LimitTimer(machine.ClockSource, 1, this, "Reset", enabled: false, eventEnabled: true, direction: Direction.Ascending, workMode: WorkMode.OneShot);
@@ -24,20 +27,34 @@ namespace Antmicro.Renode.Peripherals.Timers
                     machine.RequestReset();
                 }
             };
+            interruptTimer = new LimitTimer(machine.ClockSource, 1, this, "Interrupt", enabled: false, eventEnabled: true, direction: Direction.Ascending, workMode: WorkMode.OneShot);
+            interruptTimer.LimitReached += () =>
+            {
+                interruptStatus.Value = true;
+                UpdateIRQ();
+            };
 
             DefineRegisters();
         }
 
         public long Size => 0x400;
 
+        public override void Reset()
+        {
+            base.Reset();
+            resetTimer.Enabled = false;
+            interruptTimer.Enabled = false;
+            IRQ.Unset();
+        }
+
         private void DefineRegisters()
         {
             Registers.Configuration.Define(this, 0xFFFF00)
                 .WithFlag(0, out var timerEnabled, name: "WDTEN")
-                .WithTaggedFlag("INTEN", 1)
+                .WithFlag(1, out var interruptEnable, name: "INTEN")
                 .WithFlag(2, out resetEnabled, name: "RESEN")
-                .WithTaggedFlag("DSPRESETINTEN", 3)
-                .WithReservedBits(4, 4)
+                .WithFlag(3, name: "DSPRESETINTEN")
+                .WithIgnoredBits(4, 4)
                 .WithValueField(8, 8, out var resetLimit, name: "RESVAL")
                 .WithValueField(16, 8, out var interruptLimit, name: "INTVAL")
                 .WithEnumField<DoubleWordRegister, ClockSelect>(24, 3, out var clockSelect, name: "CLKSEL")
@@ -73,6 +90,10 @@ namespace Antmicro.Renode.Peripherals.Timers
                         resetTimer.Frequency = frequency;
                         resetTimer.Limit = resetLimit.Value * FrequencyMultiplier;
                         resetTimer.Enabled = enableTimers && resetEnabled.Value;
+
+                        interruptTimer.Frequency = frequency;
+                        interruptTimer.Limit = Math.Max(interruptLimit.Value, 1) * FrequencyMultiplier;
+                        interruptTimer.Enabled = enableTimers && interruptEnable.Value;
                     });
 
             Registers.Restart.Define(this)
@@ -81,11 +102,35 @@ namespace Antmicro.Renode.Peripherals.Timers
                         if(value == WatchdogReloadValue)
                         {
                             resetTimer.ResetValue();
+                            interruptTimer.ResetValue();
                         }
                     });
 
+            Registers.Lock.Define(this)
+                .WithValueField(0, 32, name: "LOCK");
+
             Registers.CounterValue.Define(this)
                 .WithValueField(0, 8, FieldMode.Read, name: "COUNT", valueProviderCallback: _ => TimerValue);
+
+            // WDT interrupt block (WDTIEREN/STAT/CLR/SET): single INT source.
+            Registers.InterruptEnable.Define(this)
+                .WithFlag(0, name: "INTEN");
+            Registers.InterruptStatus.Define(this)
+                .WithFlag(0, out interruptStatus, FieldMode.Read, name: "INT")
+                .WithChangeCallback((_, __) => UpdateIRQ());
+            Registers.InterruptClear.Define(this)
+                .WithFlag(0, FieldMode.WriteOneToClear, name: "INTCLR",
+                    writeCallback: (_, v) => { if(v) { interruptStatus.Value = false; UpdateIRQ(); } })
+                .WithIgnoredBits(1, 31);
+            Registers.InterruptSet.Define(this)
+                .WithFlag(0, FieldMode.Write, name: "INTSET",
+                    writeCallback: (_, v) => { if(v) { interruptStatus.Value = true; UpdateIRQ(); } })
+                .WithIgnoredBits(1, 31);
+        }
+
+        private void UpdateIRQ()
+        {
+            IRQ.Set(interruptStatus.Value);
         }
 
         private ulong TimerValue
@@ -101,8 +146,10 @@ namespace Antmicro.Renode.Peripherals.Timers
         }
 
         private IFlagRegisterField resetEnabled;
+        private IFlagRegisterField interruptStatus;
 
         private readonly LimitTimer resetTimer;
+        private readonly LimitTimer interruptTimer;
 
         private const ulong WatchdogReloadValue = 0xB2;
         private const int FrequencyMultiplier = 16;
