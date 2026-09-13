@@ -58,9 +58,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         private void UpdateIRQ()
         {
-            var en = ReadDoubleWord(0x300);
-            var stat = ReadDoubleWord(0x304);
-            if((en & stat) != 0) IRQ.Set(); else IRQ.Unset();
+            // Register-file model: interrupt semantics are not modelled for
+            // this block yet. The IRQ output exists for platform wiring but
+            // is intentionally never asserted (no fabricated levels).
+            IRQ.Unset();
         }
 
         private readonly Dictionary<long, uint> registers = new Dictionary<long, uint>();

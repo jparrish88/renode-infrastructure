@@ -51,10 +51,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         private void UpdateIRQ()
         {
-            uint en=0, stat=0;
-            if(registers.TryGetValue(0x100, out var v1)) en|=v1;
-            if(registers.TryGetValue(0x104, out var v2)) stat|=v2;
-            if((en & stat)!=0) IRQ.Set(); else IRQ.Unset();
+            // Register-file model: interrupt semantics are not modelled for
+            // this block yet. The IRQ output exists for platform wiring but
+            // is intentionally never asserted (no fabricated levels).
+            IRQ.Unset();
         }
         private static bool IsIrqRegister(long o) => o==0x100||o==0x104||o==0x108||o==0x10C;
 
