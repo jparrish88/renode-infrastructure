@@ -778,11 +778,48 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 this.Log(LogLevel.Info, "IPC: queued LE DHKey event for 0x2026");
                 return;
             }
+            if(opcode == 0x2017) // LE_Encrypt (AES-128 ECB): key(16) + plaintext(16) -> ciphertext(16)
+            {
+                if(plen >= 32)
+                {
+                    var key = new byte[16];
+                    var plain = new byte[16];
+                    Array.Copy(frame, 20, key, 0, 16);
+                    Array.Copy(frame, 36, plain, 0, 16);
+                    var cipher = AesEcbEncrypt(key, plain);
+                    var evt = new List<byte> { 0x04, 0x0E, 0x14, 0x01, 0x17, 0x20, 0x00 };
+                    evt.AddRange(cipher);
+                    rxPending.Enqueue(Tuple.Create(hostEptAddr, evt.ToArray(), $"HCI CC op=0x{opcode:X}"));
+                    this.Log(LogLevel.Info, "IPC: LE_Encrypt key={0} plain={1} -> cipher={2}", BitConverter.ToString(key), BitConverter.ToString(plain), BitConverter.ToString(cipher));
+                }
+                else
+                {
+                    this.Log(LogLevel.Warning, "IPC: LE_Encrypt plen={0} < 32, returning zeros", plen);
+                    var evt = new List<byte> { 0x04, 0x0E, 0x14, 0x01, 0x17, 0x20, 0x00 };
+                    evt.AddRange(new byte[16]);
+                    rxPending.Enqueue(Tuple.Create(hostEptAddr, evt.ToArray(), $"HCI CC op=0x{opcode:X}"));
+                }
+                return;
+            }
             var parms = HciReturnParams(opcode);
             var evt2 = new List<byte> { 0x04, 0x0E, (byte)(4 + parms.Length), 0x01,
                 (byte)(opcode & 0xFF), (byte)((opcode >> 8) & 0xFF), 0x00 };
             evt2.AddRange(parms);
             rxPending.Enqueue(Tuple.Create(hostEptAddr, evt2.ToArray(), $"HCI CC op=0x{opcode:X}"));
+        }
+
+        private byte[] AesEcbEncrypt(byte[] key, byte[] plaintext)
+        {
+            using(var aes = System.Security.Cryptography.Aes.Create())
+            {
+                aes.Key = key;
+                aes.Mode = System.Security.Cryptography.CipherMode.ECB;
+                aes.Padding = System.Security.Cryptography.PaddingMode.None;
+                using(var encryptor = aes.CreateEncryptor())
+                {
+                    return encryptor.TransformFinalBlock(plaintext, 0, plaintext.Length);
+                }
+            }
         }
 
         // Per-opcode Command Complete return parameters (beyond status).
