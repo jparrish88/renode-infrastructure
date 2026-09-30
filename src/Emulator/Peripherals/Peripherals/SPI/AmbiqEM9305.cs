@@ -6,12 +6,15 @@
 //
 using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.SPI;
+using Antmicro.Renode.Peripherals.Wireless;
 using Antmicro.Renode.Time;
 using Antmicro.Renode.Utilities;
+using Antmicro.Renode.Utilities.Crypto;
 
 namespace Antmicro.Renode.Peripherals.SPI
 {
@@ -78,11 +81,30 @@ namespace Antmicro.Renode.Peripherals.SPI
         private const byte TypeEvent = 0x04;
         private const byte EvtCommandComplete = 0x0E;
 
+        // LE meta event (HCI_LE_META_EVT) and its subevents -- used for Connection Complete,
+        // LTK Request, and Encryption Changed notifications to the cordio host.
+        private const byte EvtLeMeta = 0x3E;
+        private const byte LeSubConnComplete = 0x01;
+        private const byte LeSubLtkReq       = 0x05;
+        private const byte LeSubEncChange    = 0x08;
+
         // Opcodes answered with a data payload during host bring-up / HciResetSequence.
+        // Values are the authoritative cordio HCI_LE opcodes (OGF_LE_CONTROLLER=0x08 -> 0x2000+OCF),
+        // taken from third_party/cordio/wsf/include/hci_defs.h so a real host's traffic is handled.
         private const ushort OpcReadBdAddress          = 0x1009;
         private const ushort OpcLeReadBufferSize       = 0x2002;
         private const ushort OpcLeReadLocalSupFeat     = 0x2003;
-        private const ushort OpcLeRand                 = 0x2018;
+        private const ushort OpcLeEncrypt              = 0x2017;   // HCI_OCF_LE_ENCRYPT 0x17 (was wrongly 0x2014)
+        private const ushort OpcLeRand                 = 0x2018;   // HCI_OCF_LE_RAND    0x18 (was wrongly 0x2010)
+        private const ushort OpcLeReadRemoteFeatures   = 0x2016;   // HCI_OCF_LE_READ_REMOTE_FEAT 0x16 (was wrongly 0x2018)
+
+        // LE Secure Connections command surface (all added for SMP/LESC pairing).
+        private const ushort OpcLeStartEncryption      = 0x2019;   // [handle(2)][ltk(16)][rand(8)][ediv(2)]
+        private const ushort OpcLeLtkReqRepl           = 0x201A;   // [handle(2)][ltk(16)]
+        private const ushort OpcLeLtkReqNegRepl        = 0x201B;   // [handle(2)][reason]
+        private const ushort OpcLeReadLocalP256PubKey  = 0x2025;   // -> status + local ephemeral pub key X||Y (64)
+        private const ushort OpcLeGenerateDhkey        = 0x2026;   // [peerX(32)][peerY(32)] -> status + W(32)
+
         private const ushort OpcLeReadSupportedStates  = 0x201C;
         private const ushort OpcLeReadResolvingList    = 0x202A;
         private const ushort OpcLeReadMaxDataLength    = 0x202F;
@@ -418,6 +440,12 @@ namespace Antmicro.Renode.Peripherals.SPI
                     break;
                 }
 
+                case OpcLeReadRemoteFeatures:   // reply status + representative 7-byte remote LL feature set (LE encryption supported).
+                {
+                    EnqueueCommandComplete(opcode, 0x00, new byte[] { 0x1F, 0x26, 0x9C, 0x02, 0x2D, 0xF3, 0x05 });
+                    break;
+                }
+
                 case OpcLeReadSupportedStates:
                     EnqueueCommandComplete(opcode, 0x00, new byte[] { 0xFF, 0xFF, 0x1F, 0x01, 0x00, 0x00, 0x00, 0x00 });
                     break;
@@ -467,11 +495,206 @@ namespace Antmicro.Renode.Peripherals.SPI
                     EnqueueCommandComplete(opcode, 0x00);
                     break;
 
+                case OpcLeEncrypt:   // params = [encryption_key(16)][plaintext(16)]; reply carries AES-128 ciphertext(16).
+                    {
+                        var key = new byte[16];
+                        var plain = new byte[16];
+                        int avail = cmd.Length - 4;                 // params start at index 4 (after [type][op_lo][op_hi][plen])
+                        if (avail < 0)
+                        {
+                            avail = 0;
+                        }
+
+                        Array.Copy(cmd, 4, key, 0, Math.Min(16, avail));
+                        if (avail > 16)
+                        {
+                            Array.Copy(cmd, 20, plain, 0, Math.Min(16, avail - 16));
+                        }
+
+                        EnqueueCommandComplete(opcode, 0x00, Aes128EcbEncrypt(key, plain));
+                    }
+                    break;
+
+                case OpcLeReadLocalP256PubKey:   // LE Secure Connections: return the local ephemeral P-256 public key (X||Y).
+                    {
+                        var eph = EnsureLocalEphemeral();
+                        var pub = new byte[64];
+                        Array.Copy(eph.PubX, 0, pub, 0, 32);
+                        Array.Copy(eph.PubY, 0, pub, 32, 32);
+                        EnqueueCommandComplete(opcode, 0x00, pub);
+                    }
+                    break;
+
+                case OpcLeGenerateDhkey:   // params = [peerPubX(32)][peerPubY(32)]; reply carries W = g1(localPriv, peer) (32 bytes).
+                    {
+                        int avail = cmd.Length - 4;
+                        if (avail >= 64)
+                        {
+                            var eph = EnsureLocalEphemeral();
+                            var peerX = new byte[32]; Array.Copy(cmd, 4, peerX, 0, 32);
+                            var peerY = new byte[32]; Array.Copy(cmd, 36, peerY, 0, 32);
+                            EnqueueCommandComplete(opcode, 0x00, BleScCrypto.G1(eph.Priv, peerX, peerY));
+                        }
+                        else
+                        {
+                            EnqueueCommandComplete(opcode, 0x00);
+                        }
+                    }
+                    break;
+
+                case OpcLeStartEncryption:   // params = [conn_handle(2)][ltk(16)][rand(8)][ediv(2)].
+                    {
+                        int avail = cmd.Length - 4;
+                        bool encStarted = false;
+                        if (avail >= 28)
+                        {
+                            var ltk = new byte[16]; Array.Copy(cmd, 6, ltk, 0, 16);
+                            activeLtk = ltk;    // retained for the on-air CTR encryption of Data PDUs.
+                            this.Log(LogLevel.Info, "EM9305: LE Start Encryption handle={0:X2}{1:X2}, LTK stored", cmd[4], cmd[5]);
+                            encStarted = true;
+                        }
+
+                        EnqueueCommandComplete(opcode, 0x00);
+
+                        // Controller completed the (modelled) START_ENC exchange -> notify the host with an
+                        // async Encryption Changed event: [conn_handle(2)][status][enc_mode].
+                        if (encStarted)
+                        {
+                            EnqueueLeMeta(LeSubEncChange, cmd[4], cmd[5], 0x00, 0x01);
+                        }
+                    }
+                    break;
+
+                case OpcLeLtkReqRepl:   // params = [conn_handle(2)][ltk(16)]; this controller is supplied the LTK.
+                    {
+                        int avail = cmd.Length - 4;
+                        if (avail >= 18)
+                        {
+                            var ltk = new byte[16]; Array.Copy(cmd, 6, ltk, 0, 16);
+                            activeLtk = ltk;
+                        }
+
+                        EnqueueCommandComplete(opcode, 0x00);
+                    }
+                    break;
+
+                case OpcLeLtkReqNegRepl:   // params = [conn_handle(2)][reason]; pairing was rejected.
+                    EnqueueCommandComplete(opcode, 0x00);
+                    break;
+
                 default:
                     // Set/config commands and everything else -> Command Complete, no return data.
                     EnqueueCommandComplete(opcode, 0x00);
                     break;
             }
+        }
+
+        /// <summary>
+        /// AES-128 single-block (ECB) encryption -- the Bluetooth LE "Encrypt" function. Encrypts exactly one
+        /// 16-byte plaintext block under a 16-byte key and returns the 16-byte ciphertext, matching HCI_LE_ENCRYPT
+        /// command-complete semantics consumed by the cordio host (status + data[16]).
+        /// </summary>
+        private static byte[] Aes128EcbEncrypt(byte[] key, byte[] plain)
+        {
+            var block = Block.UsingBytes(plain);   // wraps `plain` without copying
+            using (var aes = AesProvider.GetEcbProvider(key))
+            {
+                aes.EncryptBlockInSitu(block);     // AES-128 ECB in place -> `plain` now holds the ciphertext
+            }
+
+            return plain;
+        }
+
+        // LE Secure Connections state for this controller instance.
+        private byte[] localEphPriv;   // ephemeral P-256 private scalar (32 bytes, big-endian), generated lazily.
+        private byte[] localEphPubX;   // X of Q = priv * G.
+        private byte[] localEphPubY;   // Y of Q = priv * G.
+        private byte[] activeLtk;      // LTK stored from Start Encryption / LTK Request Reply (for CTR encryption).
+
+        /// <summary>
+        /// Lazily generate and cache this controller's ephemeral P-256 key pair used by the LE Secure
+        /// Connections commands. Returns (Priv, PubX, PubY); all 32-byte big-endian values. The private
+        /// scalar is kept below the P-256 prime so BleScCrypto.GeneratePublicKey always accepts it.
+        /// </summary>
+        private (byte[] Priv, byte[] PubX, byte[] PubY) EnsureLocalEphemeral()
+        {
+            if (localEphPriv != null)
+            {
+                return (localEphPriv, localEphPubX, localEphPubY);
+            }
+
+            var priv = new byte[32];
+            while (true)
+            {
+                RandomNumberGenerator.Fill(priv);
+                priv[0] &= 0x7F;   // clear the top bit -> scalar < P-256 prime, so it is always in range.
+
+                bool nonzero = false;
+                for (int i = 0; i < 32 && !nonzero; i++)
+                {
+                    nonzero = priv[i] != 0;
+                }
+
+                if (!nonzero)
+                {
+                    continue;   // astronomically rare all-zero scalar; redraw.
+                }
+
+                var pub = BleScCrypto.GeneratePublicKey(priv);
+                localEphPriv = priv;
+                localEphPubX = pub.X;
+                localEphPubY = pub.Y;
+                return (priv, pub.X, pub.Y);
+            }
+        }
+
+        /// <summary>
+        /// Public view of this controller's P-256 ephemeral key pair -- exactly the material reported by
+        /// LE_Read_Local_P256_Pub_Key (0x2025): (Priv, PubX, PubY), each a 32-byte big-endian field value. Exposed so a
+        /// host or the link layer can be driven with the same keys that ride over the air in the Pair PDUs.
+        /// </summary>
+        public (byte[] Priv, byte[] PubX, byte[] PubY) GetLocalP256Ephemeral() => EnsureLocalEphemeral();
+
+        /// <summary>
+        /// Computes this controller's P-256 DH secret g1(own_priv, peer_pub), exactly as LE_Generate_DHKey (0x2026)
+        /// answers it: the 32-byte big-endian X coordinate of own_priv * Q(peer_pub). Returns null when peerPub is not
+        /// a full 64-byte point, mirroring the command path's no-data reply.
+        /// </summary>
+        public byte[] ComputeLocalDhKey(byte[] peerPub)
+        {
+            if (peerPub == null || peerPub.Length < 64)
+            {
+                return null;
+            }
+
+            var x = new byte[32]; Array.Copy(peerPub, 0, x, 0, 32);
+            var y = new byte[32]; Array.Copy(peerPub, 32, y, 0, 32);
+
+            var eph = EnsureLocalEphemeral();
+            return BleScCrypto.G1(eph.Priv, x, y);
+        }
+
+        /// <summary>
+        /// Build and enqueue an LE Meta event. Layout: [type=04][evt=3E][plen][subevent][payload...] where
+        /// plen = 1 + payload.Length (the one-byte subevent code plus the sub-specific fields). Cordio reads
+        /// the subevent at byte index 3 and its fields from index 4 onward.
+        /// </summary>
+        private void EnqueueLeMeta(byte subEvent, params byte[] payload)
+        {
+            int plen = 1 + payload.Length;
+
+            var evt = new List<byte>(3 + plen);
+            evt.Add(TypeEvent);
+            evt.Add(EvtLeMeta);
+            evt.Add((byte)plen);
+            evt.Add(subEvent);
+            foreach (var b in payload)
+            {
+                evt.Add(b);
+            }
+
+            this.Log(LogLevel.Info, "EM9305: LE_META subevent=0x{0:X2} len={1}", subEvent, payload.Length);
+            EnqueueData(evt);
         }
 
         private void HandleVendorSpecific(ushort opcode, byte[] cmd)

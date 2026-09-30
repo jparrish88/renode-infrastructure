@@ -35,6 +35,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         public long Size => 0x500;
 
+        private Antmicro.Renode.Core.Structure.Registers.IValueRegisterField pllctl0;
+
         private void DefineRegisters()
         {
         // 88 registers from apollo510L.svd.
@@ -118,10 +120,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         Registers.SSRAMMISCCTRL.Define(this, 0x4A4).WithValueField(0, 32, name: "SSRAMMISCCTRL", valueProviderCallback: _ => 0x7);
         Registers.DISPSTATUS.Define(this, 0x4B0).WithValueField(0, 32, name: "DISPSTATUS", valueProviderCallback: _ => 0x0);
         Registers.CPUCFG.Define(this, 0x4CC).WithValueField(0, 32, name: "CPUCFG", valueProviderCallback: _ => 0x0);
-        Registers.PLLCTL0.Define(this, 0x4D8).WithValueField(0, 32, name: "PLLCTL0", valueProviderCallback: _ => 0xC000001F);
+        Registers.PLLCTL0.Define(this, 0x4D8).WithValueField(0, 32, out pllctl0, name: "PLLCTL0"); // RW: SYSPLLPDB[29] gates PLLSTAT.LOCK
         Registers.PLLDIV0.Define(this, 0x4DC).WithValueField(0, 32, name: "PLLDIV0", valueProviderCallback: _ => 0x6AAAAB);
         Registers.PLLDIV1.Define(this, 0x4E0).WithValueField(0, 32, name: "PLLDIV1", valueProviderCallback: _ => 0x1102);
-        Registers.PLLSTAT.Define(this, 0x4E4).WithValueField(0, 32, name: "PLLSTAT", valueProviderCallback: _ => 0x0);
+        Registers.PLLSTAT.Define(this, 0x4E4).WithValueField(0, 32, name: "PLLSTAT", valueProviderCallback: _ => (pllctl0 != null && (pllctl0.Value & (1u << 29)) != 0) ? 0x1u : 0x0u); // LOCK follows SYSPLLPDB (ideal lock)
         Registers.PLLMUXCTL.Define(this, 0x4E8).WithValueField(0, 32, name: "PLLMUXCTL", valueProviderCallback: _ => 0xE);
         Registers.CM4CODEBASE.Define(this, 0x4F0).WithValueField(0, 32, name: "CM4CODEBASE", valueProviderCallback: _ => 0x0);
         Registers.RADIOFINECNT.Define(this, 0x4F4).WithValueField(0, 32, name: "RADIOFINECNT", valueProviderCallback: _ => 0x0);

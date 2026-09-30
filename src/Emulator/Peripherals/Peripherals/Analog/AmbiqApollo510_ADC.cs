@@ -14,6 +14,8 @@ using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.Sensor;
+using Antmicro.Renode.Peripherals.Timers;
+using Antmicro.Renode.Time;
 using Antmicro.Renode.Utilities.RESD;
 
 namespace Antmicro.Renode.Peripherals.Analog
@@ -23,6 +25,7 @@ namespace Antmicro.Renode.Peripherals.Analog
     {
         public AmbiqApollo510_ADC(IMachine machine) : base(machine)
         {
+            this.machine = machine;
             fifo = new Queue<FifoEntry>();
             interruptStatuses = new bool[InterruptsCount];
             IRQ = new GPIO();
@@ -45,6 +48,7 @@ namespace Antmicro.Renode.Peripherals.Analog
         {
             base.Reset();
 
+            StopIrtt();
             fifo.Clear();
             for(int interruptNumber = 0; interruptNumber < InterruptsCount; interruptNumber++)
             {
@@ -104,9 +108,9 @@ namespace Antmicro.Renode.Peripherals.Analog
         private void DefineRegisters()
         {
             Registers.Configuration.Define(this)
-                .WithFlag(0, out moduleEnabled, name: "ADCEN", writeCallback: (oldValue, newValue) => { if(oldValue && !newValue) fifo.Clear(); })
+                .WithFlag(0, out moduleEnabled, name: "ADCEN", writeCallback: (oldValue, newValue) => { if(oldValue && !newValue) { fifo.Clear(); StopIrtt(); } else if(newValue && !oldValue) { TryUpdateIrtt(); } })
                 .WithIgnoredBits(1, 1)
-                .WithFlag(2, name: "RPTEN")
+                .WithFlag(2, out repeatEnabled, name: "RPTEN", writeCallback: (_, __) => TryUpdateIrtt())
                 .WithFlag(3, name: "LPMODE")
                 .WithFlag(4, name: "CKMODE")
                 .WithIgnoredBits(5, 7)
@@ -114,7 +118,7 @@ namespace Antmicro.Renode.Peripherals.Analog
                 .WithIgnoredBits(13, 3)
                 .WithValueField(16, 3, name: "TRIGSEL")
                 .WithFlag(19, name: "TRIGPOL")
-                .WithFlag(20, name: "RPTTRIGSEL")
+                .WithFlag(20, out repeatIntTrigger, name: "RPTTRIGSEL", writeCallback: (_, __) => TryUpdateIrtt())
                 .WithIgnoredBits(21, 3)
                 .WithValueField(24, 2, name: "CLKSEL")
                 .WithIgnoredBits(26, 6)
@@ -196,11 +200,11 @@ namespace Antmicro.Renode.Peripherals.Analog
                 ;
 
             Registers.InternalTimerConfiguration.Define(this)
-                .WithValueField(0, 10, name: "TIMERMAX")
+                .WithValueField(0, 10, out irttMax, name: "TIMERMAX", writeCallback: (_, __) => TryUpdateIrtt())
                 .WithIgnoredBits(10, 6)
-                .WithValueField(16, 3, name: "CLKDIV")
+                .WithValueField(16, 3, out irttClkDiv, name: "CLKDIV", writeCallback: (_, __) => TryUpdateIrtt())
                 .WithIgnoredBits(19, 12)
-                .WithFlag(31, name: "TIMEREN")
+                .WithFlag(31, out irttEnabled, name: "TIMEREN", writeCallback: (_, __) => TryUpdateIrtt())
                 ;
 
             Registers.ZeroCrossingComparatorConfiguration.Define(this)
@@ -418,6 +422,72 @@ namespace Antmicro.Renode.Peripherals.Analog
         private IFlagRegisterField fifoPushEnabled;
         private IFlagRegisterField[] interruptEnableFlags;
         private IFlagRegisterField moduleEnabled;
+
+        // Internal repeat-trigger timer (IRTT): HFRC 24MHz / CLKDIV, period
+        // TIMERMAX+1 ticks. Rearms scans for REPEATING_SCAN workloads.
+        private readonly IMachine machine;
+        private IFlagRegisterField repeatEnabled;
+        // RPTTRIGSEL: 0 = external timer (TMR), 1 = internal repeat timer (INT).
+        private IFlagRegisterField repeatIntTrigger;
+        private IFlagRegisterField irttEnabled;
+        private IValueRegisterField irttMax;
+        private IValueRegisterField irttClkDiv;
+        private LimitTimer irttTimer;
+
+        private void TryUpdateIrtt()
+        {
+            if(moduleEnabled != null && moduleEnabled.Value
+               && repeatEnabled != null && repeatEnabled.Value
+               && (repeatIntTrigger == null || repeatIntTrigger.Value)
+               && irttEnabled != null && irttEnabled.Value)
+            {
+                uint div;
+                switch(irttClkDiv.Value)
+                {
+                case 0: div = 1; break;
+                case 1: div = 2; break;
+                case 2: div = 4; break;
+                case 4: div = 16; break;
+                default: div = 1u << (int)irttClkDiv.Value; break;
+                }
+                var ticks = (ulong)irttMax.Value + 1;
+                var freq = 24000000uL / div / (ticks == 0 ? 1 : ticks);
+                if(freq == 0)
+                {
+                    freq = 1;
+                }
+                if(irttTimer == null)
+                {
+                    irttTimer = new LimitTimer(machine.ClockSource, freq, this, "adc-irtt",
+                        limit: 1, direction: Direction.Ascending, enabled: true,
+                        workMode: WorkMode.Periodic, eventEnabled: true, autoUpdate: true);
+                    irttTimer.LimitReached += OnIrttTick;
+                }
+                else
+                {
+                    irttTimer.Frequency = freq;
+                    irttTimer.Enabled = true;
+                }
+                this.DebugLog("ADC IRTT armed: div {0}, max {1} ({2} Hz)", div, irttMax.Value, freq);
+            }
+            else
+            {
+                StopIrtt();
+            }
+        }
+
+        private void OnIrttTick()
+        {
+            ScanAllSlots();
+        }
+
+        private void StopIrtt()
+        {
+            if(irttTimer != null)
+            {
+                irttTimer.Enabled = false;
+            }
+        }
 
         // DMA state
         private IValueRegisterField dmaEn, dmaTotCount, dmaTargAddrLo, dmaTargAddrHi, dmaCplFlag;

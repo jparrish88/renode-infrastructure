@@ -4,10 +4,11 @@
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
 //
- // Apollo510 Lite PDM0 (PDM @ 0x40201000, IRQ48).
-// NEW file for the Lite family.
+ // Apollo510 PDM0 (PDM @ 0x40201000, IRQ48).
+// NEW file for the Apollo510 family.
 //
-// Register map + reset values from pack/SVD/apollo510L.svd (21 regs).
+// Register map + reset values from SVD/apollo510.svd (21 regs).
+// Differs from the Lite PDM only in DMATOTCOUNT (0x250 here, 0x150 there).
 // Phase-2 model: paced DMA completion for power profiling.
 //  - On DMA arm (DMACFG.DMAEN + DMATRIGEN.DTHR with CTRL enabled) a
 //    virtual-time LimitTimer fires once per audio buffer (TOTCOUNT bytes at
@@ -30,7 +31,7 @@ using Antmicro.Renode.Time;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous
 {
-    public class AmbiqApollo510L_PDM : BasicDoubleWordPeripheral, IKnownSize
+    public class AmbiqApollo510_PDM : BasicDoubleWordPeripheral, IKnownSize
     {
         // PDM sample rate used for pacing (16kHz for the SDK pdm_fft config:
         // PLL 24.576MHz / 2 / 6 / 2 / 64). Firmware with a different clock
@@ -39,13 +40,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         public GPIO IRQ { get; } = new GPIO();
 
-        public AmbiqApollo510L_PDM(IMachine machine) : base(machine)
+        public AmbiqApollo510_PDM(IMachine machine) : base(machine)
         {
             this.machine = machine;
             Reset();
         }
 
-        public long Size => 0x200;
+        public long Size => 0x300;
 
         public override void Reset()
         {
@@ -119,7 +120,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             {
                 return; // already pacing
             }
-            uint tot = registers.TryGetValue(0x150, out var n) ? n : 0u;
+            uint tot = registers.TryGetValue(0x250, out var n) ? n : 0u;
             if(tot == 0) tot = 4096;
             double seconds = (tot / 4.0) / SampleRateHz;
             ulong freq = (ulong)Math.Max(Math.Round(1.0 / Math.Max(seconds, 1e-6)), 1);
@@ -145,7 +146,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private void OnDmaBufferDone()
         {
             uint addr = registers.TryGetValue(0x154, out var a) ? a : 0u;
-            uint tot = registers.TryGetValue(0x150, out var n) ? n : 0u;
+            uint tot = registers.TryGetValue(0x250, out var n) ? n : 0u;
             if(tot == 0) tot = 4096;
             if(addr != 0)
             {
@@ -199,7 +200,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             new KeyValuePair<long, uint>(0x140, 0x00000000), // DMATRIGEN
             new KeyValuePair<long, uint>(0x144, 0x00000000), // DMATRIGSTAT
             new KeyValuePair<long, uint>(0x148, 0x00000000), // DMACFG
-            new KeyValuePair<long, uint>(0x150, 0x00000000), // DMATOTCOUNT
+            new KeyValuePair<long, uint>(0x250, 0x00000000), // DMATOTCOUNT
             new KeyValuePair<long, uint>(0x154, 0x00000000), // DMATARGADDR
             new KeyValuePair<long, uint>(0x158, 0x00000000), // DMASTAT
             new KeyValuePair<long, uint>(0x160, 0x00000000), // DMATARGADDRNEXT

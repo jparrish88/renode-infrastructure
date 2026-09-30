@@ -56,6 +56,18 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         public event Action<IRadio, byte[]> FrameSent;
 
+        // Raised for every air frame delivered to this radio by the wireless medium.
+        public event Action<byte[] /* frame */, IRadio /* sender */> FrameReceived;
+
+        // Directly emit an already-formed air frame (used by the simulated link layer).
+        public void TransmitFrame(byte[] frame)
+        {
+            if(frame != null && frame.Length > 0)
+            {
+                FrameSent?.Invoke(this, frame);
+            }
+        }
+
         private void Transmit()
         {
             var length = (int)txLength.Value;
@@ -73,6 +85,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             lastReceived = frame ?? Array.Empty<byte>();
             rxLength.Value = (uint)Math.Min(lastReceived.Length, 255);
+            FrameReceived?.Invoke(lastReceived, sender);
         }
 
         public byte[] LastReceived => lastReceived;

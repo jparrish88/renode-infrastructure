@@ -334,6 +334,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         // Queue them; flush on the poll tick (>=5ms later, sender settled).
         private readonly Queue<Tuple<uint, byte[], string>> rxPending = new Queue<Tuple<uint, byte[], string>>();
         private readonly Random randomGen = new Random();
+        // Scripted LE air events for power profiling (no RF peer exists):
+        // after scan enable, periodic EXT_ADV_REPORT naming a fake peer;
+        // after create-sync, SYNC_ESTABLISHED then PER_ADV_REPORTs at the
+        // periodic interval. Paced on the 200Hz poll tick so the host stack
+        // wakes at silicon-plausible rates instead of parking in WFI.
+        private int airState; // 0 idle, 1 scanning, 2 sync pending, 3 synced
+        private int airTick;
+        private static readonly byte[] AirPeerAddr = new byte[] { 0x33, 0x22, 0x11, 0x84, 0x22, 0xC0 };
+        private static readonly byte[] AirAdvData = new byte[] {
+            0x0B, 0x09, 0x41, 0x6D, 0x5F, 0x50, 0x65, 0x72, 0x5F, 0x41, 0x64, 0x76 }; // "Am_Per_Adv"
         private bool rxVringLatched;
         // Last discovered vring geometry (HOST-RX inject target + HOST-TX snoop).
         private ulong rxVringAddr;
@@ -383,6 +393,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             // The HOST suppresses TX kicks once flowing (avail event flags),
             // so poll TX here too; TrySnoopTx is silent when idle.
             TrySnoopTx();
+            AirTick();
             // Flush deferred responses in order; stop on first uninjectable
             // (no RX buffer yet) to preserve ordering.
             int flushGuard = 0;
@@ -758,6 +769,24 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             uint opcode = BitConverter.ToUInt16(frame, 17);
             uint plen = frame[19];
             this.Log(LogLevel.Info, "IPC: HCI CMD op=0x{0:X} plen={1}", opcode, plen);
+            // Air-state tracking for scripted LE events (CC still synthesized below).
+            if(opcode == 0x2042 && plen >= 1) // LE Set Extended Scan Enable
+            {
+                airState = frame[20] != 0 ? 1 : 0;
+                airTick = 0;
+                this.Log(LogLevel.Info, "IPC: air state -> {0}", airState == 1 ? "scanning" : "idle");
+            }
+            else if(opcode == 0x2044) // LE Periodic Advertising Create Sync
+            {
+                if(airState == 1) airState = 2;
+                airTick = 0;
+                this.Log(LogLevel.Info, "IPC: air state -> sync pending");
+            }
+            else if(opcode == 0x2045) // LE Periodic Advertising Terminate Sync
+            {
+                airState = 1;
+                airTick = 0;
+            }
             // P256/DHKey use LE Meta events, not Command Complete, or Cordio never fires SecEccHciCback.
             if(opcode == 0x2025) // LE Read Local P256 Public Key
             {
@@ -860,6 +889,50 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     return new byte[] { 0xFB, 0x00, 0x48, 0x08 };
                 default:
                     return new byte[0];
+            }
+        }
+
+        // Scripted LE air traffic (see airState fields): one EXT_ADV_REPORT
+        // per ~60ms while scanning, SYNC_ESTABLISHED once after create-sync,
+        // then PER_ADV_REPORT per ~100ms while synced. Rates mirror the
+        // example's scan window/interval and periodic interval so host wakeups
+        // (dispatcher, STIMER, IPC TX/RX) settle at a realistic duty cycle.
+        private void AirTick()
+        {
+            if(airState == 0)
+            {
+                return;
+            }
+            airTick++;
+            if(airState == 1 && airTick % 12 == 0)
+            {
+                var evt = new List<byte> { 0x04, 0x3E, 0x26, 0x01, 0x0D,
+                    0x13, 0x00, 0x01 };
+                evt.AddRange(AirPeerAddr);
+                evt.AddRange(new byte[] { 0x01, 0x01, 0x00, 0x00, 0xC4,
+                    0xA0, 0x00, 0x00 });
+                evt.AddRange(new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+                evt.Add((byte)AirAdvData.Length);
+                evt.AddRange(AirAdvData);
+                rxPending.Enqueue(Tuple.Create(hostEptAddr, evt.ToArray(), "HCI LE EXT_ADV_REPORT Am_Per_Adv"));
+            }
+            else if(airState == 2 && airTick >= 6)
+            {
+                var evt = new List<byte> { 0x04, 0x3E, 0x11, 0x01, 0x0E,
+                    0x00, 0x01, 0x00, 0x00, 0x01 };
+                evt.AddRange(AirPeerAddr);
+                evt.AddRange(new byte[] { 0x01, 0xA0, 0x00, 0x00 });
+                rxPending.Enqueue(Tuple.Create(hostEptAddr, evt.ToArray(), "HCI LE SYNC_ESTABLISHED"));
+                airState = 3;
+                airTick = 0;
+                this.Log(LogLevel.Info, "IPC: air state -> synced");
+            }
+            else if(airState == 3 && airTick % 20 == 0)
+            {
+                var evt = new List<byte> { 0x04, 0x3E, 0x15, 0x01, 0x0F,
+                    0x01, 0x00, 0x00, 0xC4, 0xFF, 0x00, (byte)AirAdvData.Length };
+                evt.AddRange(AirAdvData);
+                rxPending.Enqueue(Tuple.Create(hostEptAddr, evt.ToArray(), "HCI LE PER_ADV_REPORT"));
             }
         }
 
