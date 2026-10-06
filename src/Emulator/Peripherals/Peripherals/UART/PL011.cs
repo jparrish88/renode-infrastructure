@@ -55,8 +55,8 @@ namespace Antmicro.Renode.Peripherals.UART
                 UpdateReceiveFifoSize();
                 UpdateReceiveInterruptTriggerPoint();
 
-                System.Array.ForEach(interruptRawStatuses, status => status = false);
-                System.Array.ForEach(interruptMasks, mask => mask = false);
+                System.Array.Clear(interruptRawStatuses, 0, interruptRawStatuses.Length);
+                System.Array.Clear(interruptMasks, 0, interruptMasks.Length);
                 UpdateInterrupts();
             }
         }
@@ -246,8 +246,8 @@ namespace Antmicro.Renode.Peripherals.UART
 
                 Registers.DMAControl.Define(this)
                     .WithFlag(0, name: "RXDMAE - Receive DMA enable")
-                    .WithFlag(1, name: "TXDMAE - Transmit DMA enable (write 1 to start TX DMA)",
-                        writeCallback: (_, value) => { if (value) PerformTxDma(); })
+                    .WithFlag(1, out txDmaEnabled, name: "TXDMAE - Transmit DMA enable (rising edge starts TX DMA)",
+                        changeCallback: (oldValue, value) => { if(value && !oldValue) PerformTxDma(); })
                     .WithFlag(2, name: "DMAONERR - DMA on error")
                     .WithIgnoredBits(3, 13)
                     ;
@@ -452,6 +452,9 @@ namespace Antmicro.Renode.Peripherals.UART
                 }
             }
 
+            // COUNT is the remaining-byte counter consumed by the HAL when it
+            // calculates the completed transfer length.
+            dmaTransferCount.Value = 0;
             interruptRawStatuses[(int)Interrupts.DmaComplete] = true;
             UpdateInterrupts();
             this.Log(LogLevel.Noisy, "UART DMA TX complete: {0} bytes transferred.", count);
@@ -476,6 +479,7 @@ namespace Antmicro.Renode.Peripherals.UART
         private IValueRegisterField receiveInterruptFifoLevelSelect;
         private IFlagRegisterField stickParitySelect;
         private IFlagRegisterField transmitEnable;
+        private IFlagRegisterField txDmaEnabled;
         private IFlagRegisterField twoStopBitsSelect;
         private IFlagRegisterField uartEnable;
         private IEnumRegisterField<WordLength> wordLength;
