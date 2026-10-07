@@ -22,7 +22,10 @@ namespace Antmicro.Renode
     {
         static Emulator()
         {
-            UserDirectoryPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData, Environment.SpecialFolderOption.Create), "renode");
+            var configuredUserDirectory = Environment.GetEnvironmentVariable("RENODE_USER_DIRECTORY");
+            UserDirectoryPath = String.IsNullOrWhiteSpace(configuredUserDirectory)
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData, Environment.SpecialFolderOption.Create), "renode")
+                : Path.GetFullPath(configuredUserDirectory);
             exitLock = new object();
         }
 

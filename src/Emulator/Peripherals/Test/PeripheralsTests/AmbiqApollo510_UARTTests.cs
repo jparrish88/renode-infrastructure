@@ -46,6 +46,7 @@ namespace Antmicro.Renode.PeripheralsTests
             Assert.That(transmitted, Is.EqualTo(new byte[] { 0x41, 0x42 }));
             Assert.That(uart.ReadDoubleWord(0x3C) & (1u << 11), Is.EqualTo(1u << 11));
             Assert.That(uart.ReadDoubleWord(0x40), Is.EqualTo(1u << 11));
+            Assert.That(uart.IRQ.IsSet, Is.True, "DMA-complete must assert the UART IRQ line");
             Assert.That(uart.ReadDoubleWord(0x50), Is.Zero);
 
             // Rewriting TXDMAE while it is already set must not launch another transfer.
@@ -64,6 +65,7 @@ namespace Antmicro.Renode.PeripheralsTests
 
             Assert.That(transmitted, Is.EqualTo(new byte[] { 0x41, 0x42, 0x43, 0x44 }));
             Assert.That(uart.ReadDoubleWord(0x3C) & (1u << 11), Is.EqualTo(1u << 11));
+            Assert.That(uart.IRQ.IsSet, Is.True, "re-armed DMA-complete must assert the UART IRQ line");
             Assert.That(uart.ReadDoubleWord(0x50), Is.Zero);
         }
 
