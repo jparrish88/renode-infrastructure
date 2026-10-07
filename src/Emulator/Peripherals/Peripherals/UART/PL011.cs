@@ -4,10 +4,13 @@
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
 //
+using System;
+
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Time;
 
 namespace Antmicro.Renode.Peripherals.UART
 {
@@ -46,6 +49,7 @@ namespace Antmicro.Renode.Peripherals.UART
 
         public override void Reset()
         {
+            dmaTransferGeneration++;
             base.Reset();
             lock(innerLock)
             {
@@ -247,7 +251,19 @@ namespace Antmicro.Renode.Peripherals.UART
                 Registers.DMAControl.Define(this)
                     .WithFlag(0, name: "RXDMAE - Receive DMA enable")
                     .WithFlag(1, out txDmaEnabled, name: "TXDMAE - Transmit DMA enable (rising edge starts TX DMA)",
-                        changeCallback: (oldValue, value) => { if(value && !oldValue) PerformTxDma(); })
+                        changeCallback: (oldValue, value) =>
+                        {
+                            if(value && !oldValue)
+                            {
+                                PerformTxDma();
+                            }
+                            else if(!value && oldValue)
+                            {
+                                // A disabled DMA channel abandons any completion
+                                // that has not reached the bus yet.
+                                dmaTransferGeneration++;
+                            }
+                        })
                     .WithFlag(2, name: "DMAONERR - DMA on error")
                     .WithIgnoredBits(3, 13)
                     ;
@@ -277,10 +293,26 @@ namespace Antmicro.Renode.Peripherals.UART
                     .WithFlag(1, name: "PE - Parity error", valueProviderCallback: _ => false)
                     .WithFlag(2, name: "BE - Break error", valueProviderCallback: _ => false)
                     .WithFlag(3, name: "OE - Overrun error", valueProviderCallback: _ => false)
-                    .WithFlag(4, FieldMode.Read, name: "DMACPL - DMA transfer complete",
-                        valueProviderCallback: _ => interruptRawStatuses[(int)Interrupts.DmaComplete])
-                    .WithFlag(5, FieldMode.Read, name: "DMAERR - DMA error",
-                        valueProviderCallback: _ => interruptRawStatuses[(int)Interrupts.DmaError])
+                    .WithFlag(4, FieldMode.Read | FieldMode.WriteZeroToClear, name: "DMACPL - DMA transfer complete",
+                        valueProviderCallback: _ => interruptRawStatuses[(int)Interrupts.DmaComplete],
+                        writeCallback: (_, value) =>
+                        {
+                            if(!value)
+                            {
+                                interruptRawStatuses[(int)Interrupts.DmaComplete] = false;
+                                UpdateInterrupts();
+                            }
+                        })
+                    .WithFlag(5, FieldMode.Read | FieldMode.WriteZeroToClear, name: "DMAERR - DMA error",
+                        valueProviderCallback: _ => interruptRawStatuses[(int)Interrupts.DmaError],
+                        writeCallback: (_, value) =>
+                        {
+                            if(!value)
+                            {
+                                interruptRawStatuses[(int)Interrupts.DmaError] = false;
+                                UpdateInterrupts();
+                            }
+                        })
                     .WithReservedBits(6, 2)
                     ;
 
@@ -441,23 +473,48 @@ namespace Antmicro.Renode.Peripherals.UART
                 return;
             }
 
-            this.Log(LogLevel.Noisy, "UART DMA TX starting: addr=0x{0:X}, count={1}", address, count);
+            var transferGeneration = ++dmaTransferGeneration;
+            // The SDK marks the transfer busy only after the TXDMAE write
+            // returns.  Completing DMA synchronously from the register callback
+            // lets the CPU service the interrupt before that state transition,
+            // which prevents the SDK from clearing TXDMAE and leaves later
+            // transfers permanently busy.  A virtual-time action models the
+            // hardware transaction boundary without tying the model to host
+            // wall-clock time.
+            // A UART frame contains one start bit, the configured data bits,
+            // optional parity, and the stop bit.  The DMA completion is
+            // reported after the requested bytes have crossed the UART, not
+            // when the descriptor is merely accepted by the peripheral.
+            var frameBits = 1 + 5 + (int)wordLength.Value + (parityEnable.Value ? 1 : 0) + (twoStopBitsSelect.Value ? 2 : 1);
+            var transferTime = TimeInterval.FromSeconds((double)frameBits * count / Math.Max(1, BaudRate));
+            Machine.ScheduleAction(transferTime, _ => CompleteTxDma(address, count, transferGeneration),
+                name: "Apollo510 UART DMA completion");
+        }
 
-            for(var i = 0; i < count; i++)
+        private void CompleteTxDma(ulong address, int count, ulong transferGeneration)
+        {
+            lock(innerLock)
             {
-                var byteVal = sysbusCtrl.ReadByte(address + (ulong)i, context: this);
-                if(!loopbackEnable.Value)
+                if(transferGeneration != dmaTransferGeneration || !txDmaEnabled.Value)
                 {
-                    TransmitCharacter(byteVal);
+                    return;
                 }
-            }
 
-            // COUNT is the remaining-byte counter consumed by the HAL when it
-            // calculates the completed transfer length.
-            dmaTransferCount.Value = 0;
-            interruptRawStatuses[(int)Interrupts.DmaComplete] = true;
-            UpdateInterrupts();
-            this.Log(LogLevel.Noisy, "UART DMA TX complete: {0} bytes transferred.", count);
+                for(var i = 0; i < count; i++)
+                {
+                    var byteVal = sysbusCtrl.ReadByte(address + (ulong)i, context: this);
+                    if(!loopbackEnable.Value)
+                    {
+                        TransmitCharacter(byteVal);
+                    }
+                }
+
+                // COUNT is the remaining-byte counter consumed by the HAL when it
+                // calculates the completed transfer length.
+                dmaTransferCount.Value = 0;
+                interruptRawStatuses[(int)Interrupts.DmaComplete] = true;
+                UpdateInterrupts();
+            }
         }
 
         private uint InterruptMask => Renode.Utilities.BitHelper.GetValueFromBitsArray(interruptMasks);
@@ -485,6 +542,7 @@ namespace Antmicro.Renode.Peripherals.UART
         private IEnumRegisterField<WordLength> wordLength;
         private IValueRegisterField dmaTargetAddress;
         private IValueRegisterField dmaTransferCount;
+        private ulong dmaTransferGeneration;
 
         private readonly bool sbsaMode;
         private readonly uint hardwareFifoSize;
